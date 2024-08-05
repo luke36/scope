@@ -700,7 +700,7 @@ Rule Bind(Port &&from, Port &&to) {
   return Rule(RuleType::Bind, from.param->mom, 0, std::move(from), std::move(to));
 }
 
-#include <minisat/core/Solver.h>
+#include "minisat/core/Solver.h"
 
 std::map<Rule, Minisat::Var> rule_var;
 std::map<PortPath, Minisat::Var> path_var;
