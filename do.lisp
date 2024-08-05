@@ -4,31 +4,31 @@
 (defsort Bind :import 2 :export 1)
 
 (defun var (: x VarUse) :sort Expr)
-(defscope :function var :import ((x 0)))
+(defscope var :import ((x 0)))
 (defun lambda (: xs IdList) (: e Expr) :sort Expr)
-(defscope :function lambda :import ((xs 0) (e 0)) :bind ((e 0) (xs 0)))
+(defscope lambda :import ((xs 0) (e 0)) :bind ((e 0) (xs 0)))
 (defun app (: f Expr) (: es ExprList) :sort Expr)
-(defscope :function app :import ((f 0) (es 0)))
+(defscope app :import ((f 0) (es 0)))
 (defun letrec (: bind Bind) (: body Expr) :sort Expr)
-(defscope :function letrec :import ((bind 0) (bind 1) (body 0)) :bind ((body 0) (bind 0)))
+(defscope letrec :import ((bind 0) (bind 1) (body 0)) :bind ((body 0) (bind 0)))
 
 (defun more-binds (: x VarDef) (: e Expr) (: binds Bind) :sort Bind)
-(defscope :function more-binds
+(defscope more-binds
           :import ((x 0) (binds 0)) ((e 0) (binds 1))
           :export ((x 0) (binds 0))
           :bind ((e 0) (x 0)) ((e 0) (binds 0)) ((binds 1) (x 0)))
 (defun end-binds :sort Bind)
-(defscope :function end-binds :import () () :export ())
+(defscope end-binds :import () () :export ())
 
 (defun id-cons (: x VarDef) (: xs IdList) :sort IdList)
-(defscope :function id-cons :import ((x 0) (xs 0)) :export ((x 0) (xs 0)))
+(defscope id-cons :import ((x 0) (xs 0)) :export ((x 0) (xs 0)))
 (defun id-nil :sort IdList)
-(defscope :function id-nil :import () :export ())
+(defscope id-nil :import () :export ())
 
 (defun expr-cons (: e Expr) (: es ExprList) :sort ExprList)
-(defscope :function expr-cons :import ((e 0) (es 0)))
+(defscope expr-cons :import ((e 0) (es 0)))
 (defun expr-nil :sort ExprList)
-(defscope :function expr-nil :import ())
+(defscope expr-nil :import ())
 
 (defsort Stx :import 2 :export 1)
 (defun end-do-binds :sort Stx)

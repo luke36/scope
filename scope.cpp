@@ -1,3 +1,4 @@
+// todo: impose that fresh idents should (uniquely) bound
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -519,14 +520,12 @@ void readDefscope(std::istream &is) {
   vector<TextPortSet> imports;
   vector<TextPortSet> exports;
   vector<std::pair<TextPort, TextPort>> binds;
-  string name;
+  string name = readString(is);
   char c;
   while ((c = getcharSkip(is)) != ')') {
     is.putback(c);
     string &&which = readString(is);
-    if (which == ":function") {
-      name = readString(is);
-    } else if (which == ":import") {
+    if (which == ":import") {
       while ((c = getcharSkip(is)) == '(') {
         imports.emplace_back();
         while ((c = getcharSkip(is)) == '(') {
@@ -970,6 +969,17 @@ void generateConstraint(const Macro &macro) {
               addIff(p, q);
             }
           }
+        } else if (h1.first != g1.first && hs2.find(h1.first) != hs2.end()) {
+          // discarded should not bind anything
+          for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
+            for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
+              auto from1 = PortLoc(h1.second, Polar::Import, i);
+              auto to1 = PortLoc(g1.second, Polar::Export, j);
+              auto lca1 = lca(from1.e, to1.e);
+              auto p = analyzePath(PortPath(from1, to1, lca1));
+              solver->addClause(Minisat::mkLit(p, true));
+            }
+          }
         }
       }
     }
@@ -1040,33 +1050,33 @@ void doInfer() {
     generateConstraint(m);
   }
   solver.solve();
-  for (auto &p : rule_var) {
-    auto &r = p.first;
-    auto var = p.second;
-    std::cout << r.func->name;
-    switch (r.type) {
-    case RuleType::Import:
-      std::cout << " import " << r.from.param->name;
-      break;
-    case RuleType::Export:
-      std::cout << " export " << r.to.param->name;
-      break;
-    case RuleType::Bind:
-      std::cout << " bind " << r.from.param->name << ' ' << r.to.param->name;
-      break;
-    }
-    std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
-    std::cout << std::endl;
-  }
-  for (auto &pr : path_var) {
-    auto &p = pr.first;
-    auto var = pr.second;
-    p.from.e->show(std::cout);
-    std::cout << " ";
-    p.to.e->show(std::cout);
-    std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
-    std::cout << std::endl;
-  }
+  // for (auto &p : rule_var) {
+  //   auto &r = p.first;
+  //   auto var = p.second;
+  //   std::cout << r.func->name;
+  //   switch (r.type) {
+  //   case RuleType::Import:
+  //     std::cout << " import " << r.from.param->name;
+  //     break;
+  //   case RuleType::Export:
+  //     std::cout << " export " << r.to.param->name;
+  //     break;
+  //   case RuleType::Bind:
+  //     std::cout << " bind " << r.from.param->name << ' ' << r.to.param->name;
+  //     break;
+  //   }
+  //   std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
+  //   std::cout << std::endl;
+  // }
+  // for (auto &pr : path_var) {
+  //   auto &p = pr.first;
+  //   auto var = pr.second;
+  //   p.from.e->show(std::cout);
+  //   std::cout << " ";
+  //   p.to.e->show(std::cout);
+  //   std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
+  //   std::cout << std::endl;
+  // }
   if (solver.okay()) {
     readbackScope();
   } else {
