@@ -25,3 +25,4 @@
 
 (infer)
 (dump)
+(regexp var lambda app let more-binds end-binds)

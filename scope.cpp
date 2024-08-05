@@ -300,7 +300,7 @@ struct Environment {
     }
     for (auto &f : funcs) {
       if (f.second->scoped) {
-        os << "(defscope :function " << f.second->name;
+        os << "(defscope " << f.second->name;
         if (!f.second->imports.empty()) {
           os << " :import";
         }
@@ -580,6 +580,26 @@ void readResolve(std::istream &is, std::function<void (ExprP)> k) {
   k(e);
 }
 
+struct RegExp {
+  virtual void show(std::ostream &os) const = 0;
+};
+
+typedef shared_ptr<RegExp> RegExpP;
+
+RegExpP characterize(vector<FunctionWP> &fs);
+
+void readRegexp(std::istream &is) {
+  vector<FunctionWP> fs;
+  char c;
+  while ((c = getcharSkip(is)) != ')') {
+    is.putback(c);
+    string &&func = readString(is);
+    fs.emplace_back(env.findFunctionException(func));
+  }
+  characterize(fs)->show(std::cout);
+  is.putback(c);
+}
+
 void repl(std::istream &is) {
   while (true) {
     std::cerr << "> ";
@@ -611,6 +631,8 @@ void repl(std::istream &is) {
         readInfer(is);
       } else if (form == "dump") {
         env.dump(std::cout);
+      } else if (form == "regexp") {
+        readRegexp(is);
       } else {
         fail("repl: bad form");
       }
@@ -1085,7 +1107,318 @@ void doInfer() {
   env.pending_macro.clear();
 }
 
-// -------- regexp tbd --------
+// -------- regexp --------
+
+struct Empty : public RegExp {
+  Empty() {}
+  virtual void show(std::ostream &os) const override {
+    os << "nothing";
+  };
+};
+
+typedef Empty *EmptyP;
+
+struct Eps : public RegExp {
+  Eps() {}
+  virtual void show(std::ostream &os) const override {
+    os << "empty";
+  };
+};
+
+typedef Eps *EpsP;
+
+typedef bool direction;
+#define UP true
+#define DOWN false
+
+struct Char : public RegExp {
+  ParameterP param;
+  direction dir;
+  Char(ParameterP param, direction dir): param(param), dir(dir) {}
+
+  virtual void show(std::ostream &os) const override {
+    os << param->mom->name << "." << param->name;
+    os << (dir == UP ? "↑" : "↓");
+  };
+};
+
+typedef Char *CharP;
+
+struct Concat : public RegExp {
+  vector<RegExpP> rs;
+  Concat(vector<RegExpP> &&rs): rs(std::move(rs)) {}
+
+  virtual void show(std::ostream &os) const override {
+    os << "(concat";
+    for (auto r : rs) {
+      os << " ";
+      r->show(os);
+    }
+    os << ")";
+  };
+};
+
+typedef Concat *ConcatP;
+
+struct Or : public RegExp {
+  vector<RegExpP> rs;
+  Or(vector<RegExpP> &&rs): rs(std::move(rs)) {}
+
+  virtual void show(std::ostream &os) const override {
+    os << "(or";
+    for (auto r : rs) {
+      os << " ";
+      r->show(os);
+    }
+    os << ")";
+  };
+};
+
+typedef Or *OrP;
+
+struct Many : public RegExp {
+  RegExpP r;
+  Many(RegExpP r): r(r) {}
+
+  virtual void show(std::ostream &os) const override {
+    os << "(many ";
+    r->show(os);
+    os << ")";
+  };
+};
+
+inline RegExpP mkEps() {
+  Eps *p = new Eps();
+  return shared_ptr<RegExp>(p);
+}
+
+inline RegExpP mkEmpty() {
+  Empty *p = new Empty();
+  return shared_ptr<RegExp>(p);
+}
+
+inline RegExpP mkChar(ParameterP param, direction dir) {
+  Char *p = new Char(param, dir);
+  return shared_ptr<RegExp>(p);
+}
+
+inline RegExpP mkConcat(vector<RegExpP> &&rs) {
+  Concat *p = new Concat(std::move(rs));
+  return shared_ptr<RegExp>(p);
+}
+
+inline RegExpP mkOr(vector<RegExpP> &&rs) {
+  Or *p = new Or(std::move(rs));
+  return shared_ptr<RegExp>(p);
+}
+
+inline RegExpP mkMany(RegExpP r) {
+  Many *p = new Many(r);
+  return shared_ptr<RegExp>(p);
+}
+
+// smart constructors
+// todo: avoid deep copy; (or x x) = x
+RegExpP sOr(RegExpP r1, RegExpP r2) {
+  if (EmptyP em1 = dynamic_cast<EmptyP>(r1.get()); em1 != nullptr) {
+    return r2;
+  }
+  if (EmptyP em2 = dynamic_cast<EmptyP>(r2.get()); em2 != nullptr) {
+    return r1;
+  }
+  if (OrP or1 = dynamic_cast<OrP>(r1.get()),
+          or2 = dynamic_cast<OrP>(r2.get());
+      or1 != nullptr && or2 != nullptr) {
+    vector<RegExpP> rs = or1->rs;
+    for (auto r : or2->rs) {
+      rs.emplace_back(r);
+    }
+    return mkOr(std::move(rs));
+  } else if (or1 != nullptr) {
+    vector<RegExpP> rs = or1->rs;
+    rs.emplace_back(r2);
+    return mkOr(std::move(rs));
+  } else if (or2 != nullptr) {
+    vector<RegExpP> rs = or2->rs;
+    rs.insert(rs.begin(), r1);
+    return mkOr(std::move(rs));
+  } else {
+    return mkOr({r1, r2});
+  }
+}
+
+RegExpP sConcat(RegExpP left, RegExpP right) {
+  if (EmptyP eml = dynamic_cast<EmptyP>(left.get()); eml != nullptr) {
+    return left;
+  }
+  if (EmptyP emr = dynamic_cast<EmptyP>(right.get()); emr != nullptr) {
+    return right;
+  }
+  if (EpsP epl = dynamic_cast<EpsP>(left.get()); epl != nullptr) {
+    return right;
+  }
+  if (EpsP epr = dynamic_cast<EpsP>(right.get()); epr != nullptr) {
+    return left;
+  }
+  if (ConcatP conl = dynamic_cast<ConcatP>(left.get()),
+              conr = dynamic_cast<ConcatP>(right.get());
+      conl != nullptr && conr != nullptr) {
+    vector<RegExpP> rs = conl->rs;
+    for (auto r : conr->rs) {
+      rs.emplace_back(r);
+    }
+    return mkConcat(std::move(rs));
+  } else if (conl != nullptr) {
+    vector<RegExpP> rs = conl->rs;
+    rs.emplace_back(right);
+    return mkConcat(std::move(rs));
+  } else if (conr != nullptr) {
+    vector<RegExpP> rs = conr->rs;
+    rs.insert(rs.begin(), left);
+    return mkConcat(std::move(rs));
+  } else {
+    return mkConcat({left, right});
+  }
+}
+
+struct RHS {
+  RegExpP c;
+  std::map<Id, RegExpP> xs;
+  RHS(RegExpP c, std::map<Id, RegExpP> &&xs):
+    c(c), xs(std::move(xs)) {}
+};
+
+struct SortPort {
+  SortWP sort;
+  PortId port;
+  Polar polar;
+  SortPort(SortWP sort, PortId port, Polar polar):
+    sort(sort), port(port), polar(polar) {}
+  bool operator<(const SortPort &other) const {
+    return sort < other.sort ||
+           (sort == other.sort &&
+            (port < other.port ||
+             (port == other.port &&
+              polar < other.polar)));
+  }
+};
+
+std::map<SortPort, Id> numbering;
+vector<RHS> automate;
+
+Id sortPortToId(SortWP sort, PortId port, Polar polar) {
+  auto sp = SortPort(sort, port, polar);
+  if (auto it = numbering.find(sp); it != numbering.end()) {
+    return it->second;
+  } else {
+    if (sort->name == "VarDef" && polar == Polar::Export) {
+      automate.emplace_back(mkEps(), std::map<Id, RegExpP>());
+    } else {
+      automate.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+    }
+    return numbering[sp] = automate.size() - 1;
+  }
+}
+
+void addTransition(Id from, Id to, RegExpP ch) {
+  auto &xs = automate[from].xs;
+  if (xs.find(to) == xs.end()) {
+    xs[to] = ch;
+  } else {
+    xs[to] = sOr(xs[to], ch);
+  }
+}
+
+Id addState() {
+  automate.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+  return automate.size() - 1;
+}
+
+void buildAutomate(const vector<FunctionWP> &fs) {
+  numbering.clear();
+  automate.clear();
+  sortPortToId(env.findSort("VarUse").value(), 0, Polar::Import);
+  for (auto f : fs) {
+    for (size_t i = 0; i < f->imports.size(); i++) {
+      for (auto &p : f->imports[i]) {
+        addTransition(sortPortToId(p.param->sort, p.port, Polar::Import),
+                      sortPortToId(f->sort, i, Polar::Import),
+                      mkChar(p.param, UP));
+      }
+    }
+    for (size_t i = 0; i < f->exports.size(); i++) {
+      for (auto &p : f->exports[i]) {
+        addTransition(sortPortToId(f->sort, i, Polar::Export),
+                      sortPortToId(p.param->sort, p.port, Polar::Export),
+                      mkChar(p.param, DOWN));
+      }
+    }
+    for (auto &pa : f->params) {
+      for (size_t i = 0; i < pa.binds.size(); i++) {
+        bool first = true;
+        Id tmp;
+        for (auto &p : pa.binds[i]) {
+          if (first) {
+            tmp = addState();
+            first = false;
+          }
+          addTransition(sortPortToId(pa.sort, i, Polar::Import), tmp,
+                        mkChar(&pa, UP));
+          addTransition(tmp, sortPortToId(p.param->sort, p.port, Polar::Export),
+                        mkChar(p.param, DOWN));
+        }
+      }
+    }
+  }
+}
+
+// Brzozowski's algorithm
+
+// [r/x]s
+void subst(Id x, const RHS &r, RHS &s) {
+  if (auto it = s.xs.find(x); it != s.xs.end()) {
+    auto a = it->second;
+    s.xs.erase(x);
+    s.c = sOr(s.c, sConcat(a, r.c));
+    for (auto &p : r.xs) {
+      if (auto it = s.xs.find(p.first); it != s.xs.end()) {
+        it->second = sOr(it->second, sConcat(a, p.second));
+      } else {
+        s.xs[p.first] = sConcat(a, p.second);
+      }
+    }
+  }
+}
+
+RegExpP solve() {
+  while (automate.size() > 0) {
+    auto x = automate.size() - 1;
+    auto &r = automate.back();
+    if (auto it = r.xs.find(x); it != r.xs.end()) {
+      auto a = it->second;
+      r.xs.erase(x);
+      auto as = mkMany(a);
+      r.c = sConcat(as, r.c);
+      for (auto &b : r.xs) {
+        b.second = sConcat(as, b.second);
+      }
+    }
+    for (size_t i = 0; i < automate.size() - 1; i++) {
+      subst(x, automate.back(), automate[i]);
+    }
+    if (automate.size() > 1) {
+      automate.pop_back();
+    } else {
+      break;
+    }
+  }
+  return automate[0].c;
+}
+
+RegExpP characterize(vector<FunctionWP> &fs) {
+  buildAutomate(fs);
+  return solve();
+}
 
 // -------- entry --------
 
