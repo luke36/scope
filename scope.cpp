@@ -1,4 +1,3 @@
-// todo: impose that fresh idents should (uniquely) bound
 #include <cstdint>
 #include <functional>
 #include <iostream>
@@ -117,6 +116,8 @@ struct Var: public Expr {
     os << name;
   }
 };
+
+typedef Var *VarP;
 
 struct Hole: public Expr {
   Id id;
@@ -453,6 +454,7 @@ uint readUInt(std::istream &is) {
 // (infer)
 // (resolve (let (more-binds x (var x) end-binds) (var x)))
 // (dump)
+// (regexp lambda let)
 
 void readExactChar(std::istream &is, char c) {
   if (getcharSkip(is) != c) {
@@ -922,13 +924,47 @@ ApplicationP lca(ExprWP e1, ExprWP e2) {
     d1 = d2;
     d2 = t2;
   }
-  for (; d2 > d1; d2--)
+  for (; d2 > d1; d2--) {
     e2 = e2->mom;
+  }
   while (e1 != e2) {
     e1 = e1->mom;
     e2 = e2->mom;
   }
   return dynamic_cast<ApplicationP>(e1);
+}
+
+void findFreshDef(ExprP e, std::map<string, ExprP> &fdef) {
+  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
+    for (auto e0 : ap->args) {
+      findFreshDef(e0, fdef);
+    }
+  } else if (VarP var = dynamic_cast<VarP>(e.get());
+             var != nullptr && var->self_param->sort->name == "VarDef") {
+    if (fdef.find(var->name) != fdef.end()) {
+      fail("findFreshDef: fresh identifiers with same name");
+    }
+    fdef[var->name] = e;
+  }
+}
+
+void findFreshUse(ExprP e, std::map<string, ExprP> &fdef) {
+  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
+    for (auto e0 : ap->args) {
+      findFreshUse(e0, fdef);
+    }
+  } else if (VarP var = dynamic_cast<VarP>(e.get());
+             var != nullptr && var->self_param->sort->name == "VarUse") {
+    if (auto it = fdef.find(var->name); it != fdef.end()) {
+      auto from1 = PortLoc(e.get(), Polar::Import, 0);
+      auto to1 = PortLoc(it->second.get(), Polar::Export, 0);
+      auto lca1 = lca(from1.e, to1.e);
+      auto p = analyzePath(PortPath(from1, to1, lca1));
+      solver->addClause(Minisat::mkLit(p, false));
+    } else {
+      fail("findFreshUse: unbound identifier in rhs");
+    }
+  }
 }
 
 void generateConstraint(const Macro &macro) {
@@ -1010,6 +1046,10 @@ void generateConstraint(const Macro &macro) {
         }
       }
     }
+    // fresh in rhs should be uniquely bound
+    std::map<string, ExprP> fdef;
+    findFreshDef(macro.to, fdef);
+    findFreshUse(macro.to, fdef);
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
     for (PortId i = 0; i < func->sort->n_import; i++) {
       for (PortId j = 0; j < func->sort->n_import; j++) {
