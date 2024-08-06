@@ -582,11 +582,12 @@ void readResolve(std::istream &is, std::function<void (ExprP)> k) {
 
 struct RegExp {
   virtual void show(std::ostream &os) const = 0;
+  virtual bool equal(const RegExp &other) const = 0;
 };
 
 typedef shared_ptr<RegExp> RegExpP;
 
-RegExpP characterize(vector<FunctionWP> &fs);
+std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs);
 
 void readRegexp(std::istream &is) {
   vector<FunctionWP> fs;
@@ -596,7 +597,11 @@ void readRegexp(std::istream &is) {
     string &&func = readString(is);
     fs.emplace_back(env.findFunctionException(func));
   }
-  characterize(fs)->show(std::cout);
+  auto &&ud = characterize(fs);
+  ud.first->show(std::cout);
+  std::cout << std::endl;
+  ud.second->show(std::cout);
+  std::cout << std::endl;
   is.putback(c);
 }
 
@@ -1114,6 +1119,9 @@ struct Empty : public RegExp {
   virtual void show(std::ostream &os) const override {
     os << "nothing";
   };
+  virtual bool equal(const RegExp &other) const override {
+    return dynamic_cast<const Empty *>(&other) != nullptr;
+  }
 };
 
 typedef Empty *EmptyP;
@@ -1123,6 +1131,9 @@ struct Eps : public RegExp {
   virtual void show(std::ostream &os) const override {
     os << "empty";
   };
+  virtual bool equal(const RegExp &other) const override {
+    return dynamic_cast<const Eps *>(&other) != nullptr;
+  }
 };
 
 typedef Eps *EpsP;
@@ -1140,6 +1151,13 @@ struct Char : public RegExp {
     os << param->mom->name << "." << param->name;
     os << (dir == UP ? "↑" : "↓");
   };
+  virtual bool equal(const RegExp &other) const override {
+    if (auto ch = dynamic_cast<const Char *>(&other); ch != nullptr) {
+      return param == ch->param && dir == ch->dir;
+    } else {
+      return false;
+    }
+  }
 };
 
 typedef Char *CharP;
@@ -1156,6 +1174,22 @@ struct Concat : public RegExp {
     }
     os << ")";
   };
+  virtual bool equal(const RegExp &other) const override {
+    if (auto cc = dynamic_cast<const Concat *>(&other); cc != nullptr) {
+      if (rs.size() != cc->rs.size()) {
+        return false;
+      } else {
+        for (size_t i = 0; i < rs.size(); i++) {
+          if (!rs[i]->equal(*cc->rs[i])) {
+            return false;
+          }
+        }
+        return true;
+      }
+    } else {
+      return false;
+    }
+  }
 };
 
 typedef Concat *ConcatP;
@@ -1172,6 +1206,22 @@ struct Or : public RegExp {
     }
     os << ")";
   };
+  virtual bool equal(const RegExp &other) const override {
+    if (auto o = dynamic_cast<const Or *>(&other); o != nullptr) {
+      if (rs.size() != o->rs.size()) {
+        return false;
+      } else {
+        for (size_t i = 0; i < rs.size(); i++) {
+          if (!rs[i]->equal(*o->rs[i])) {
+            return false;
+          }
+        }
+        return true;
+      }
+    } else {
+      return false;
+    }
+  }
 };
 
 typedef Or *OrP;
@@ -1185,6 +1235,13 @@ struct Many : public RegExp {
     r->show(os);
     os << ")";
   };
+  virtual bool equal(const RegExp &other) const override {
+    if (auto m = dynamic_cast<const Many *>(&other); m != nullptr) {
+      return r->equal(*m->r);
+    } else {
+      return false;
+    }
+  }
 };
 
 inline RegExpP mkEps() {
@@ -1218,12 +1275,15 @@ inline RegExpP mkMany(RegExpP r) {
 }
 
 // smart constructors
-// todo: avoid deep copy; (or x x) = x
+// todo: avoid deep copy
 RegExpP sOr(RegExpP r1, RegExpP r2) {
   if (EmptyP em1 = dynamic_cast<EmptyP>(r1.get()); em1 != nullptr) {
     return r2;
   }
   if (EmptyP em2 = dynamic_cast<EmptyP>(r2.get()); em2 != nullptr) {
+    return r1;
+  }
+  if (r1 == r2 || r1->equal(*r2)) {
     return r1;
   }
   if (OrP or1 = dynamic_cast<OrP>(r1.get()),
@@ -1334,10 +1394,10 @@ Id addState() {
   return automate.size() - 1;
 }
 
-void buildAutomate(const vector<FunctionWP> &fs) {
+void buildAutomate(const vector<FunctionWP> &fs, bool use) {
   numbering.clear();
   automate.clear();
-  sortPortToId(env.findSort("VarUse").value(), 0, Polar::Import);
+  sortPortToId(env.findSort(use ? "VarUse" : "VarDef").value(), 0, Polar::Import);
   for (auto f : fs) {
     for (size_t i = 0; i < f->imports.size(); i++) {
       for (auto &p : f->imports[i]) {
@@ -1415,9 +1475,12 @@ RegExpP solve() {
   return automate[0].c;
 }
 
-RegExpP characterize(vector<FunctionWP> &fs) {
-  buildAutomate(fs);
-  return solve();
+std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs) {
+  buildAutomate(fs, true);
+  auto ruse = solve();
+  buildAutomate(fs, false);
+  auto rdef = solve();
+  return {ruse, rdef};
 }
 
 // -------- entry --------
