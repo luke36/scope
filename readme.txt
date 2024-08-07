@@ -10,4 +10,4 @@ archive/dynamic library):
     minisat/build/release/minisat/simp/SimpSolver.o \
     minisat/build/release/minisat/utils/Options.o \
     minisat/build/release/minisat/utils/System.o
-  $ ./scope < let.lisp 2>/dev/null
+  $ ./scope let.lisp

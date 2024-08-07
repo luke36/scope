@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -682,16 +683,20 @@ void readRegexp(std::istream &is) {
   is.putback(c);
 }
 
-void repl(std::istream &is) {
+void repl(std::istream &is, bool quiet) {
   while (true) {
-    std::cerr << "> ";
+    if (!quiet) {
+      std::cout << "> ";
+    }
     try {
       char c = getcharSkip(is);
       if (c == ';') {
         while (is.good() && is.get() != '\n')
           ;
         if (!is.good()) {
-          std::cerr << "exit.";
+          if (!quiet) {
+            std::cout << "exit.";
+          }
           return;
         }
         continue;
@@ -721,12 +726,14 @@ void repl(std::istream &is) {
       readExactChar(is, ')');
     } catch (std::runtime_error &err) {
       if (is.good()) {
-        std::cout << "\e[1;31merror:\e[0m " << err.what() << std::endl;
+        std::cerr << "\e[1;31merror:\e[0m " << err.what() << std::endl;
       }
       while (is.good() && is.get() != '\n')
         ;
       if (!is.good()) {
-        std::cerr << "exit.";
+        if (!quiet) {
+          std::cout << "exit.";
+        }
         return;
       }
     }
@@ -1594,8 +1601,13 @@ std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs) {
 
 // -------- entry --------
 
-int main() {
-  repl(std::cin);
+int main(int argc, char *argv[]) {
+  for (int i = 1; i < argc; i++) {
+    std::ifstream fs(argv[i]);
+    repl(fs, true);
+    fs.close();
+  }
+  repl(std::cin, false);
 }
 
 #undef fail
