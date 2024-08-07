@@ -162,11 +162,66 @@ inline ExprP mkFunc(FunctionWP func, vector<ExprP> &&args) {
   return shared_ptr<Expr>(p);
 }
 
+void typecheck(ExprP e) {
+  if (auto var = dynamic_cast<VarP>(e.get()); var != nullptr) {
+    auto sort = e->self_param->sort;
+    if (sort->name != "VarDef" && sort->name != "VarUse") {
+      fail("typecheck: sort error");
+    }
+  } else if (auto ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
+    if (ap->self_param != nullptr &&
+        ap->func->sort != ap->self_param->sort) {
+      fail("typecheck: sort error");
+    }
+    for (auto e0 : ap->args) {
+      typecheck(e0);
+    }
+  }
+}
+
 struct Macro {
   ExprP from;
   ExprP to;
-  Macro(ExprP from, ExprP to): from(from), to(to) {}
+  std::map<Id, HoleP> from_holes;
+  std::map<Id, HoleP> to_holes;
+
+  void locateHoles(ExprP e, std::map<Id, HoleP> &m) {
+    if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
+      for (auto e0 : ap->args) {
+        locateHoles(e0, m);
+      }
+    } else if (HoleP hp = dynamic_cast<HoleP>(e.get()); hp != nullptr) {
+      m[hp->id] = hp;
+    }
+  }
+
+  Macro(ExprP from, ExprP to): from(from), to(to) {
+    locateHoles(from, from_holes);
+    locateHoles(to, to_holes);
+  }
 };
+
+void checkMacro(const Macro &m) {
+  typecheck(m.from);
+  typecheck(m.to);
+  ApplicationP ap;
+  if (ap = dynamic_cast<ApplicationP>(m.from.get()); ap == nullptr) {
+    fail("checkMacro: bad LHS");
+  }
+  for (auto &p : m.to_holes) {
+    if (auto it = m.from_holes.find(p.first); it != m.from_holes.end()) {
+      if (p.second->self_param == nullptr) {
+        if (it->second->self_param->sort != ap->func->sort) {
+          fail("checkMacro: sort error");
+        }
+      } else if (p.second->self_param->sort != it->second->self_param->sort) {
+        fail("checkMacro: sort error");
+      }
+    } else {
+      fail("checkMacro: invented hole");
+    }
+  }
+}
 
 // -------- global environment --------
 
@@ -269,18 +324,36 @@ struct Environment {
     }
 
     for (size_t i = 0; i < imports.size(); i++) {
+      if (i >= f->sort->n_import) {
+        fail("addScope: invalid import");
+      }
       for (auto &p : imports[i]) {
-        f->imports[i].emplace_back(f->findParameter(p.param), p.port);
+        auto param = f->findParameter(p.param);
+        if (p.port >= param->sort->n_import) {
+          fail("addScope: invalid import");
+        }
+        f->imports[i].emplace_back(param, p.port);
       }
     }
     for (size_t i = 0; i < exports.size(); i++) {
+      if (i >= f->sort->n_export) {
+        fail("addScope: invalid export");
+      }
       for (auto &p : exports[i]) {
-        f->exports[i].emplace_back(f->findParameter(p.param), p.port);
+        auto param = f->findParameter(p.param);
+        if (p.port >= param->sort->n_export) {
+          fail("addScope: invalid export");
+        }
+        f->exports[i].emplace_back(param, p.port);
       }
     }
     for (auto &p : binds) {
       auto from = f->findParameter(p.first.param);
       auto to = f->findParameter(p.second.param);
+      if (p.first.port >= from->sort->n_import ||
+          p.second.port >= to->sort->n_export) {
+        fail("addScope: invalid bind");
+      }
       from->binds[p.first.port].emplace_back(to, p.second.port);
     }
     f->scoped = 1;
@@ -568,7 +641,9 @@ void readDefscope(std::istream &is) {
 void readDefmacro(std::istream &is) {
   auto from = readExpr(is);
   auto to = readExpr(is);
-  env.pending_macro.emplace_back(from, to);
+  auto m = Macro(from, to);
+  checkMacro(m);
+  env.pending_macro.emplace_back(std::move(m));
 }
 
 void doInfer();
@@ -903,16 +978,6 @@ void computeDepth(ExprP e, size_t d) {
   }
 }
 
-void locateHoles(ExprP e, std::map<Id, HoleP> &m) {
-  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    for (auto e0 : ap->args) {
-      locateHoles(e0, m);
-    }
-  } else if (HoleP hp = dynamic_cast<HoleP>(e.get()); hp != nullptr) {
-    m[hp->id] = hp;
-  }
-}
-
 ApplicationP lca(ExprWP e1, ExprWP e2) {
   size_t d1 = e1->depth;
   size_t d2 = e2->depth;
@@ -968,19 +1033,36 @@ void findFreshUse(ExprP e, std::map<string, ExprP> &fdef) {
 }
 
 void generateConstraint(const Macro &macro) {
-  std::map<Id, HoleP> hs1, hs2;
+  auto &hs1 = macro.from_holes,
+       &hs2 = macro.to_holes;
   computeDepth(macro.from, 0);
   computeDepth(macro.to, 0);
-  locateHoles(macro.from, hs1);
-  locateHoles(macro.to, hs2);
   ApplicationP ap1;
   ApplicationP ap2;
   if (ap1 = dynamic_cast<ApplicationP>(macro.from.get()); ap1 == nullptr) {
     fail("generateConstraint: bad macro");
   }
   auto func = ap1->func;
+  // discarded should not bind anything
+  for (auto &h1 : hs1) {
+    for (auto &g1 : hs1) {
+      if (h1.first != g1.first &&
+          hs2.find(g1.first) == hs2.end() &&
+          hs2.find(h1.first) != hs2.end()) {
+        for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
+          for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
+            auto from1 = PortLoc(h1.second, Polar::Import, i);
+            auto to1 = PortLoc(g1.second, Polar::Export, j);
+            auto lca1 = lca(from1.e, to1.e);
+            auto p = analyzePath(PortPath(from1, to1, lca1));
+            solver->addClause(Minisat::mkLit(p, true));
+          }
+        }
+      }
+    }
+  }
   if (ap2 = dynamic_cast<ApplicationP>(macro.to.get()); ap2 != nullptr) {
-    std::map<Id, HoleP>::iterator h2, g2;
+    std::map<Id, HoleP>::const_iterator h2, g2;
     // import
     for (auto &h1 : hs1) {
       if ((h2 = hs2.find(h1.first)) != hs2.end()) {
@@ -1032,17 +1114,6 @@ void generateConstraint(const Macro &macro) {
               addIff(p, q);
             }
           }
-        } else if (h1.first != g1.first && hs2.find(h1.first) != hs2.end()) {
-          // discarded should not bind anything
-          for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
-            for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
-              auto from1 = PortLoc(h1.second, Polar::Import, i);
-              auto to1 = PortLoc(g1.second, Polar::Export, j);
-              auto lca1 = lca(from1.e, to1.e);
-              auto p = analyzePath(PortPath(from1, to1, lca1));
-              solver->addClause(Minisat::mkLit(p, true));
-            }
-          }
         }
       }
     }
@@ -1053,7 +1124,7 @@ void generateConstraint(const Macro &macro) {
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
     for (PortId i = 0; i < func->sort->n_import; i++) {
       for (PortId j = 0; j < func->sort->n_import; j++) {
-        PortLoc from(hs1[hp2->id], Polar::Import, i);
+        PortLoc from(hs1.at(hp2->id), Polar::Import, i);
         PortLoc to(macro.from.get(), Polar::Import, j);
         auto lca = ::lca(from.e, to.e);
         auto var = analyzePath(PortPath(from, to, lca));
@@ -1063,14 +1134,12 @@ void generateConstraint(const Macro &macro) {
     for (PortId i = 0; i < func->sort->n_export; i++) {
       for (PortId j = 0; j < func->sort->n_export; j++) {
         PortLoc from(macro.from.get(), Polar::Export, j);
-        PortLoc to(hs1[hp2->id], Polar::Export, i);
+        PortLoc to(hs1.at(hp2->id), Polar::Export, i);
         auto lca = ::lca(from.e, to.e);
         auto var = analyzePath(PortPath(from, to, lca));
         solver->addClause(Minisat::mkLit(var, false));
       }
     }
-  } else {
-    fail("generateConstraint: bad macro");
   }
 }
 
@@ -1404,7 +1473,7 @@ struct SortPort {
 };
 
 std::map<SortPort, Id> numbering;
-vector<RHS> automate;
+vector<RHS> automaton;
 
 Id sortPortToId(SortWP sort, PortId port, Polar polar) {
   auto sp = SortPort(sort, port, polar);
@@ -1412,16 +1481,16 @@ Id sortPortToId(SortWP sort, PortId port, Polar polar) {
     return it->second;
   } else {
     if (sort->name == "VarDef" && polar == Polar::Export) {
-      automate.emplace_back(mkEps(), std::map<Id, RegExpP>());
+      automaton.emplace_back(mkEps(), std::map<Id, RegExpP>());
     } else {
-      automate.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+      automaton.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
     }
-    return numbering[sp] = automate.size() - 1;
+    return numbering[sp] = automaton.size() - 1;
   }
 }
 
 void addTransition(Id from, Id to, RegExpP ch) {
-  auto &xs = automate[from].xs;
+  auto &xs = automaton[from].xs;
   if (xs.find(to) == xs.end()) {
     xs[to] = ch;
   } else {
@@ -1430,13 +1499,13 @@ void addTransition(Id from, Id to, RegExpP ch) {
 }
 
 Id addState() {
-  automate.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
-  return automate.size() - 1;
+  automaton.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+  return automaton.size() - 1;
 }
 
 void buildAutomate(const vector<FunctionWP> &fs, bool use) {
   numbering.clear();
-  automate.clear();
+  automaton.clear();
   sortPortToId(env.findSort(use ? "VarUse" : "VarDef").value(), 0, Polar::Import);
   for (auto f : fs) {
     for (size_t i = 0; i < f->imports.size(); i++) {
@@ -1491,9 +1560,9 @@ void subst(Id x, const RHS &r, RHS &s) {
 }
 
 RegExpP solve() {
-  while (automate.size() > 0) {
-    auto x = automate.size() - 1;
-    auto &r = automate.back();
+  while (automaton.size() > 0) {
+    auto x = automaton.size() - 1;
+    auto &r = automaton.back();
     if (auto it = r.xs.find(x); it != r.xs.end()) {
       auto a = it->second;
       r.xs.erase(x);
@@ -1503,16 +1572,16 @@ RegExpP solve() {
         b.second = sConcat(as, b.second);
       }
     }
-    for (size_t i = 0; i < automate.size() - 1; i++) {
-      subst(x, automate.back(), automate[i]);
+    for (size_t i = 0; i < automaton.size() - 1; i++) {
+      subst(x, automaton.back(), automaton[i]);
     }
-    if (automate.size() > 1) {
-      automate.pop_back();
+    if (automaton.size() > 1) {
+      automaton.pop_back();
     } else {
       break;
     }
   }
-  return automate[0].c;
+  return automaton[0].c;
 }
 
 std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs) {

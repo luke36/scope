@@ -39,8 +39,8 @@
 (defun do (: binds Stx) :sort Expr)
 (defmacro (do 1) (extracting 1 (id-nil) (expr-nil) (expr-nil)))
 (defmacro (extracting (end-do-binds) 1 2 3)
-          (letrec (more-binds loop (lambda 1 (app loop 3)) (end-binds))
-                  (app loop 2)))
+          (letrec (more-binds loop (lambda 1 (app (var loop) 3)) (end-binds))
+            (app (var loop) 2)))
 (defmacro (extracting (more-do-binds 1 2 3 4) 5 6 7)
           (extracting 4
            (id-cons 1 5) (expr-cons 2 6) (expr-cons 3 7)))
