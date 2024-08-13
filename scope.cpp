@@ -122,11 +122,21 @@ typedef Var *VarP;
 
 struct Hole: public Expr {
   Id id;
-  Hole(Id id): Expr(),id(id) {}
+  Hole(Id id): Expr(), id(id) {}
   virtual void show(std::ostream &os) const override {
     os << id;
   }
 };
+
+struct DefToUse: public Expr {
+  Id hole;
+  DefToUse(Id hole): Expr(), hole(hole) {}
+  virtual void show(std::ostream &os) const override {
+    os << "(->use " << hole << ")";
+  }
+};
+
+typedef DefToUse *DefToUseP;
 
 struct Application: public Expr {
   FunctionWP func;
@@ -163,11 +173,24 @@ inline ExprP mkFunc(FunctionWP func, vector<ExprP> &&args) {
   return shared_ptr<Expr>(p);
 }
 
-void typecheck(ExprP e) {
+inline ExprP mkDefToUse(Id hole) {
+  DefToUse *p = new DefToUse(hole);
+  return shared_ptr<Expr>(p);
+}
+
+void typecheck(ExprP e, const std::map<Id, HoleP> &holes) {
   if (auto var = dynamic_cast<VarP>(e.get()); var != nullptr) {
     auto sort = e->self_param->sort;
     if (sort->name != "VarDef" && sort->name != "VarUse") {
       fail("typecheck: sort error");
+    }
+  } else if (auto d2u = dynamic_cast<DefToUseP>(e.get()); d2u != nullptr) {
+    if (auto it = holes.find(d2u->hole); it != holes.end()) {
+      if (it->second->self_param->sort->name != "VarDef") {
+        fail("typecheck: not a definitional hole");
+      }
+    } else {
+      fail("typecheck: no such hole");
     }
   } else if (auto ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
     if (ap->self_param != nullptr &&
@@ -175,7 +198,7 @@ void typecheck(ExprP e) {
       fail("typecheck: sort error");
     }
     for (auto e0 : ap->args) {
-      typecheck(e0);
+      typecheck(e0, holes);
     }
   }
 }
@@ -203,8 +226,8 @@ struct Macro {
 };
 
 void checkMacro(const Macro &m) {
-  typecheck(m.from);
-  typecheck(m.to);
+  typecheck(m.from, std::map<Id, HoleP>());
+  typecheck(m.to, m.to_holes);
   ApplicationP ap;
   if (ap = dynamic_cast<ApplicationP>(m.from.get()); ap == nullptr) {
     fail("checkMacro: bad LHS");
@@ -471,18 +494,40 @@ string readString(std::istream &is) {
   return s;
 }
 
+void readExactChar(std::istream &is, char c) {
+  if (getcharSkip(is) != c) {
+    fail("readExactChar: bad syntax");
+  }
+}
+
 ExprP readExpr(std::istream &is) {
   auto c = getcharSkip(is);
 
   switch (c) {
   case '(': {
     string &&func = readString(is);
-    vector<ExprP> args;
-    while ((c = getcharSkip(is)) != ')') {
-      is.putback(c);
-      args.emplace_back(readExpr(is));
+    if (func == "->use") {
+      string &&s = readString(is);
+      size_t pos;
+      try {
+        Id id = std::stoul(s, &pos);
+        if (pos == s.size()) {
+          readExactChar(is, ')');
+          return mkDefToUse(id);
+        } else {
+          fail("readExpr: expecting hole");
+        }
+      } catch (...) {
+        fail("readExpr: expecting hole");
+      }
+    } else {
+      vector<ExprP> args;
+      while ((c = getcharSkip(is)) != ')') {
+        is.putback(c);
+        args.emplace_back(readExpr(is));
+      }
+      return mkFunc(env.findFunctionException(func), std::move(args));
     }
-    return mkFunc(env.findFunctionException(func), std::move(args));
     break;
   }
   default: {
@@ -529,12 +574,7 @@ uint readUInt(std::istream &is) {
 // (resolve (let (more-binds x (var x) end-binds) (var x)))
 // (dump)
 // (regexp lambda let)
-
-void readExactChar(std::istream &is, char c) {
-  if (getcharSkip(is) != c) {
-    fail("readExactChar: bad syntax");
-  }
-}
+// (exit)
 
 void readExactString(std::istream &is, const string &&s) {
   if (readString(is) != s) {
@@ -720,6 +760,8 @@ void repl(std::istream &is, bool quiet) {
         env.dump(std::cout);
       } else if (form == "regexp") {
         readRegexp(is);
+      } else if (form == "exit") {
+        exit(0);
       } else {
         fail("repl: bad form");
       }
@@ -762,6 +804,27 @@ struct PortLoc {
     e(e), polar(polar), port(port) {}
 };
 
+ApplicationP lca(ExprWP e1, ExprWP e2) {
+  size_t d1 = e1->depth;
+  size_t d2 = e2->depth;
+  if (d1 > d2) {
+    auto t1 = e1;
+    e1 = e2;
+    e2 = t1;
+    auto t2 = d1;
+    d1 = d2;
+    d2 = t2;
+  }
+  for (; d2 > d1; d2--) {
+    e2 = e2->mom;
+  }
+  while (e1 != e2) {
+    e1 = e1->mom;
+    e2 = e2->mom;
+  }
+  return dynamic_cast<ApplicationP>(e1);
+}
+
 struct PortPath {
   PortLoc from;
   PortLoc to;
@@ -771,6 +834,10 @@ struct PortPath {
   }
   PortPath(const PortLoc &from, const PortLoc &to, ApplicationP lca):
     from(from), to(to), lca(lca) {}
+  PortPath(const PortLoc &from, const PortLoc &to):
+    from(from), to(to) {
+    lca = ::lca(from.e, to.e);
+  }
 };
 
 enum class RuleType { Import, Export, Bind };
@@ -813,6 +880,8 @@ Rule Bind(Port &&from, Port &&to) {
 
 #include "minisat/core/Solver.h"
 
+using Minisat::mkLit;
+
 std::map<Rule, Minisat::Var> rule_var;
 std::map<PortPath, Minisat::Var> path_var;
 Minisat::Solver *solver;
@@ -836,23 +905,23 @@ Minisat::Var ruleToVar(const Rule &r) {
       switch (r.type) {
       case RuleType::Import:
         if (hasPort(r.func->imports[r.port], r.from)) {
-          solver->addClause(Minisat::mkLit(var, false));
+          solver->addClause(mkLit(var, false));
         } else {
-          solver->addClause(Minisat::mkLit(var, true));
+          solver->addClause(mkLit(var, true));
         }
         break;
       case RuleType::Export:
         if (hasPort(r.func->exports[r.port], r.to)) {
-          solver->addClause(Minisat::mkLit(var, false));
+          solver->addClause(mkLit(var, false));
         } else {
-          solver->addClause(Minisat::mkLit(var, true));
+          solver->addClause(mkLit(var, true));
         }
         break;
       case RuleType::Bind:
         if (hasPort(r.from.param->binds[r.from.port], r.to)) {
-          solver->addClause(Minisat::mkLit(var, false));
+          solver->addClause(mkLit(var, false));
         } else {
-          solver->addClause(Minisat::mkLit(var, true));
+          solver->addClause(mkLit(var, true));
         }
         break;
       }
@@ -873,9 +942,9 @@ void addIff(Minisat::Var p,
     // a /\ b \/ c /\ d -> e
     // a /\ b -> e, c /\ d -> e
     // ~a \/ ~b \/ e
-    solver->addClause(Minisat::mkLit(p, false),
-                      Minisat::mkLit(q1q2.first, true),
-                      Minisat::mkLit(q1q2.second, true));
+    solver->addClause(mkLit(p, false),
+                      mkLit(q1q2.first, true),
+                      mkLit(q1q2.second, true));
   }
   // e -> a /\ b \/ c /\ d
   // ~e \/ a/\b \/ c/\d
@@ -887,26 +956,39 @@ void addIff(Minisat::Var p,
     // ~a \/ ~b \/ x
     auto q1 = q1q2.first, q2 = q1q2.second;
     auto x = solver->newVar();
-    solver->addClause(Minisat::mkLit(x, true),
-                      Minisat::mkLit(q1, false));
-    solver->addClause(Minisat::mkLit(x, true),
-                      Minisat::mkLit(q2, false));
-    solver->addClause(Minisat::mkLit(x, false),
-                      Minisat::mkLit(q1, true),
-                      Minisat::mkLit(q2, true));
-    defs.push(Minisat::mkLit(x, false));
+    solver->addClause(mkLit(x, true), mkLit(q1, false));
+    solver->addClause(mkLit(x, true), mkLit(q2, false));
+    solver->addClause(mkLit(x, false), mkLit(q1, true), mkLit(q2, true));
+    defs.push(mkLit(x, false));
   }
-  defs.push(Minisat::mkLit(p, true));
+  defs.push(mkLit(p, true));
   solver->addClause(defs);
 }
 
 void addIff(Minisat::Var p, Minisat::Var q) {
   // a <-> b
   // ~a\/b /\ ~b\/a
-  solver->addClause(Minisat::mkLit(p, false),
-                    Minisat::mkLit(q, true));
-  solver->addClause(Minisat::mkLit(q, false),
-                    Minisat::mkLit(p, true));
+  solver->addClause(mkLit(p, false), mkLit(q, true));
+  solver->addClause(mkLit(q, false), mkLit(p, true));
+}
+
+void addIff(Minisat::Var p, const vector<Minisat::Lit> &ls) {
+  Minisat::Lit q;
+  if (ls.empty()) {
+    solver->addClause(mkLit(p, false));
+    return;
+  } else {
+    q = ls[0];
+    for (size_t i = 1; i < ls.size(); i++) {
+      Minisat::Var x = solver->newVar();
+      solver->addClause(mkLit(x, true), q);
+      solver->addClause(mkLit(x, true), ls[i]);
+      solver->addClause(mkLit(x, false), ~q, ~ls[i]);
+      q = mkLit(x, false);
+    }
+    solver->addClause(mkLit(p, false), ~q);
+    solver->addClause(mkLit(p, true), q);
+  }
 }
 
 Minisat::Var analyzePath(const PortPath &p) {
@@ -985,27 +1067,6 @@ void computeDepth(ExprP e, size_t d) {
   }
 }
 
-ApplicationP lca(ExprWP e1, ExprWP e2) {
-  size_t d1 = e1->depth;
-  size_t d2 = e2->depth;
-  if (d1 > d2) {
-    auto t1 = e1;
-    e1 = e2;
-    e2 = t1;
-    auto t2 = d1;
-    d1 = d2;
-    d2 = t2;
-  }
-  for (; d2 > d1; d2--) {
-    e2 = e2->mom;
-  }
-  while (e1 != e2) {
-    e1 = e1->mom;
-    e2 = e2->mom;
-  }
-  return dynamic_cast<ApplicationP>(e1);
-}
-
 void findFreshDef(ExprP e, std::map<string, ExprP> &fdef) {
   if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
     for (auto e0 : ap->args) {
@@ -1030,12 +1091,21 @@ void findFreshUse(ExprP e, std::map<string, ExprP> &fdef) {
     if (auto it = fdef.find(var->name); it != fdef.end()) {
       auto from1 = PortLoc(e.get(), Polar::Import, 0);
       auto to1 = PortLoc(it->second.get(), Polar::Export, 0);
-      auto lca1 = lca(from1.e, to1.e);
-      auto p = analyzePath(PortPath(from1, to1, lca1));
-      solver->addClause(Minisat::mkLit(p, false));
+      auto p = analyzePath(PortPath(from1, to1));
+      solver->addClause(mkLit(p, false));
     } else {
       fail("findFreshUse: unbound identifier in rhs");
     }
+  }
+}
+
+void findDefToUse(ExprP e, vector<DefToUseP> &d2u) {
+  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
+    for (auto e0 : ap->args) {
+      findDefToUse(e0, d2u);
+    }
+  } else if (DefToUseP du = dynamic_cast<DefToUseP>(e.get()); du != nullptr) {
+    d2u.emplace_back(du);
   }
 }
 
@@ -1060,9 +1130,8 @@ void generateConstraint(const Macro &macro) {
           for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
             auto from1 = PortLoc(h1.second, Polar::Import, i);
             auto to1 = PortLoc(g1.second, Polar::Export, j);
-            auto lca1 = lca(from1.e, to1.e);
-            auto p = analyzePath(PortPath(from1, to1, lca1));
-            solver->addClause(Minisat::mkLit(p, true));
+            auto p = analyzePath(PortPath(from1, to1));
+            solver->addClause(mkLit(p, true));
           }
         }
       }
@@ -1112,12 +1181,10 @@ void generateConstraint(const Macro &macro) {
             for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
               auto from1 = PortLoc(h1.second, Polar::Import, i);
               auto to1 = PortLoc(g1.second, Polar::Export, j);
-              auto lca1 = lca(from1.e, to1.e);
-              auto p = analyzePath(PortPath(from1, to1, lca1));
+              auto p = analyzePath(PortPath(from1, to1));
               auto from2 = PortLoc(h2->second, Polar::Import, i);
               auto to2 = PortLoc(g2->second, Polar::Export, j);
-              auto lca2 = lca(from2.e, to2.e);
-              auto q = analyzePath(PortPath(from2, to2, lca2));
+              auto q = analyzePath(PortPath(from2, to2));
               addIff(p, q);
             }
           }
@@ -1128,23 +1195,79 @@ void generateConstraint(const Macro &macro) {
     std::map<string, ExprP> fdef;
     findFreshDef(macro.to, fdef);
     findFreshUse(macro.to, fdef);
+    // ->use should be uniquely bound
+    vector<DefToUseP> d2us;
+    findDefToUse(macro.to, d2us);
+    for (auto d2u : d2us) {
+      for (auto &h : hs2) {
+        if (h.first == d2u->hole) {
+          auto from1 = PortLoc(d2u, Polar::Import, 0);
+          auto to1 = PortLoc(h.second, Polar::Export, 0);
+          auto p = analyzePath(PortPath(from1, to1));
+          solver->addClause(mkLit(p, false));
+        } else {
+          // // another (possible) definition e and wanted definition d
+          // // either (1) e do not access d and
+          // vector<Minisat::Lit> c;
+          // Minisat::Var p = solver->newVar();
+          // for (size_t i = 0; i < h.second->self_param->sort->n_import; i++) {
+          //   auto from1 = PortLoc(h.second, Polar::Import, i);
+          //   auto to1 = PortLoc(hs2.at(d2u->hole), Polar::Export, 0);
+          //   auto q = analyzePath(PortPath(from1, to1));
+          //   c.emplace_back(mkLit(q, true));
+          // }
+          // addIff(p, c);
+          // for (size_t i = 0; i < h.second->self_param->sort->n_export; i++) {
+          //   // in LHS, something access both
+          //   vector<std::pair<Minisat::Var, Minisat::Var>> c;
+          //   auto tod = PortLoc(hs1.at(d2u->hole), Polar::Export, 0);
+          //   auto toe = PortLoc(hs1.at(h.first), Polar::Export, i);
+          //   auto lca = ::lca(tod.e, toe.e);
+          //   for (auto ap = lca; ap != nullptr; ap = ap->mom) {
+          //     for (auto e0 : ap->args) {
+          //       if (::lca(e0.get(), tod.e) != e0.get() &&
+          //           ::lca(e0.get(), toe.e) != e0.get()) {
+          //         for (size_t i = 0; i < e0->self_param->sort->n_import; i++) {
+          //           auto from = PortLoc(e0.get(), Polar::Import, i);
+          //           c.emplace_back(analyzePath(PortPath(from, tod)),
+          //                          analyzePath(PortPath(from, toe)));
+          //         }
+          //       }
+          //     }
+          //   }
+          //   auto s = solver->newVar();
+          //   addIff(s, c);
+          //   // or (2) do not access e
+          //   auto from1 = PortLoc(d2u, Polar::Import, 0);
+          //   auto to1 = PortLoc(hs2.at(h.first), Polar::Export, i);
+          //   auto q = analyzePath(PortPath(from1, to1));
+          //   // or (3) d access e
+          //   auto from2 = PortLoc(hs2.at(d2u->hole), Polar::Import, 0);
+          //   auto to2 = to1;
+          //   auto r = analyzePath(PortPath(from2, to2));
+          //   // (p /\ s) \/ ~q \/ r
+          //   // (p \/ ~q \/ r) /\ (s \/ ~q \/ r)
+          //   solver->addClause(mkLit(p, false), mkLit(q, true), mkLit(r, false));
+          //   solver->addClause(mkLit(s, false), mkLit(q, true), mkLit(r, false));
+          // }
+        }
+      }
+    }
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
     for (PortId i = 0; i < func->sort->n_import; i++) {
       for (PortId j = 0; j < func->sort->n_import; j++) {
         PortLoc from(hs1.at(hp2->id), Polar::Import, i);
         PortLoc to(macro.from.get(), Polar::Import, j);
-        auto lca = ::lca(from.e, to.e);
-        auto var = analyzePath(PortPath(from, to, lca));
-        solver->addClause(Minisat::mkLit(var, false));
+        auto var = analyzePath(PortPath(from, to));
+        solver->addClause(mkLit(var, false));
       }
     }
     for (PortId i = 0; i < func->sort->n_export; i++) {
       for (PortId j = 0; j < func->sort->n_export; j++) {
         PortLoc from(macro.from.get(), Polar::Export, j);
         PortLoc to(hs1.at(hp2->id), Polar::Export, i);
-        auto lca = ::lca(from.e, to.e);
-        auto var = analyzePath(PortPath(from, to, lca));
-        solver->addClause(Minisat::mkLit(var, false));
+        auto var = analyzePath(PortPath(from, to));
+        solver->addClause(mkLit(var, false));
       }
     }
   }
