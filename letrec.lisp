@@ -34,3 +34,5 @@
 
 (infer)
 (dump)
+(regexp void var begin set! let more-bind end-bind letrec more-rec-bind end-rec-bind)
+(exit)

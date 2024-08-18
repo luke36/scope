@@ -7,3 +7,4 @@
 (defmacro (evil 2 1)
           (lambda 1 2))
 (infer)
+(exit)

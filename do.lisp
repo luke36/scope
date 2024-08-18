@@ -48,3 +48,4 @@
 (infer)
 (dump)
 (regexp var lambda app letrec more-binds end-binds id-cons id-nil expr-cons expr-nil end-do-binds more-do-binds do)
+(exit)

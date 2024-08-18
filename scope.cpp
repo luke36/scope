@@ -723,7 +723,7 @@ void readRegexp(std::istream &is) {
   is.putback(c);
 }
 
-void repl(std::istream &is, bool quiet) {
+bool repl(std::istream &is, bool quiet) {
   while (true) {
     if (!quiet) {
       std::cout << "> ";
@@ -737,7 +737,7 @@ void repl(std::istream &is, bool quiet) {
           if (!quiet) {
             std::cout << "exit.";
           }
-          return;
+          return true;
         }
         continue;
       } else if (c != '(') {
@@ -761,7 +761,7 @@ void repl(std::istream &is, bool quiet) {
       } else if (form == "regexp") {
         readRegexp(is);
       } else if (form == "exit") {
-        exit(0);
+        return false;
       } else {
         fail("repl: bad form");
       }
@@ -776,7 +776,7 @@ void repl(std::istream &is, bool quiet) {
         if (!quiet) {
           std::cout << "exit.";
         }
-        return;
+        return true;
       }
     }
   }
@@ -1727,10 +1727,14 @@ std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs) {
 int main(int argc, char *argv[]) {
   for (int i = 1; i < argc; i++) {
     std::ifstream fs(argv[i]);
-    repl(fs, true);
+    if (!repl(fs, true)) {
+      fs.close();
+      goto end;
+    }
     fs.close();
   }
   repl(std::cin, false);
+ end:
 }
 
 #undef fail
