@@ -9,8 +9,6 @@
 (defscope cdr :import ((p 0)))
 (defun if (: cond Expr) (: conseq Expr) :sort Expr)
 (defscope if :import ((cond 0) (conseq 0)))
-(defun #t :sort Expr)
-(defscope #t :import ())
 
 (defsort LetBind :import 1 :export 1)
 (defun let (: b LetBind) (: e Expr) :sort Expr)
