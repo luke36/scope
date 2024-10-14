@@ -1316,33 +1316,6 @@ void doInfer() {
     generateConstraint(m);
   }
   solver.solve();
-  // for (auto &p : rule_var) {
-  //   auto &r = p.first;
-  //   auto var = p.second;
-  //   std::cout << r.func->name;
-  //   switch (r.type) {
-  //   case RuleType::Import:
-  //     std::cout << " import " << r.from.param->name;
-  //     break;
-  //   case RuleType::Export:
-  //     std::cout << " export " << r.to.param->name;
-  //     break;
-  //   case RuleType::Bind:
-  //     std::cout << " bind " << r.from.param->name << ' ' << r.to.param->name;
-  //     break;
-  //   }
-  //   std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
-  //   std::cout << std::endl;
-  // }
-  // for (auto &pr : path_var) {
-  //   auto &p = pr.first;
-  //   auto var = pr.second;
-  //   p.from.e->show(std::cout);
-  //   std::cout << " ";
-  //   p.to.e->show(std::cout);
-  //   std::cout << " :" << !Minisat::toInt(solver.modelValue(var));
-  //   std::cout << std::endl;
-  // }
   if (solver.okay()) {
     readbackScope();
   } else {
@@ -1352,30 +1325,6 @@ void doInfer() {
 }
 
 // -------- regexp --------
-
-struct Empty : public RegExp {
-  Empty() {}
-  virtual void show(std::ostream &os) const override {
-    os << "nothing";
-  };
-  virtual bool equal(const RegExp &other) const override {
-    return dynamic_cast<const Empty *>(&other) != nullptr;
-  }
-};
-
-typedef Empty *EmptyP;
-
-struct Eps : public RegExp {
-  Eps() {}
-  virtual void show(std::ostream &os) const override {
-    os << "empty";
-  };
-  virtual bool equal(const RegExp &other) const override {
-    return dynamic_cast<const Eps *>(&other) != nullptr;
-  }
-};
-
-typedef Eps *EpsP;
 
 typedef bool direction;
 #define UP true
@@ -1483,16 +1432,6 @@ struct Many : public RegExp {
   }
 };
 
-inline RegExpP mkEps() {
-  Eps *p = new Eps();
-  return shared_ptr<RegExp>(p);
-}
-
-inline RegExpP mkEmpty() {
-  Empty *p = new Empty();
-  return shared_ptr<RegExp>(p);
-}
-
 inline RegExpP mkChar(ParameterP param, direction dir) {
   Char *p = new Char(param, dir);
   return shared_ptr<RegExp>(p);
@@ -1516,12 +1455,6 @@ inline RegExpP mkMany(RegExpP r) {
 // smart constructors
 // todo: avoid deep copy
 RegExpP sOr(RegExpP r1, RegExpP r2) {
-  if (EmptyP em1 = dynamic_cast<EmptyP>(r1.get()); em1 != nullptr) {
-    return r2;
-  }
-  if (EmptyP em2 = dynamic_cast<EmptyP>(r2.get()); em2 != nullptr) {
-    return r1;
-  }
   if (r1 == r2 || r1->equal(*r2)) {
     return r1;
   }
@@ -1547,17 +1480,13 @@ RegExpP sOr(RegExpP r1, RegExpP r2) {
 }
 
 RegExpP sConcat(RegExpP left, RegExpP right) {
-  if (EmptyP eml = dynamic_cast<EmptyP>(left.get()); eml != nullptr) {
+  if (OrP orl = dynamic_cast<OrP>(left.get());
+      orl != nullptr && orl->rs.empty()) {
     return left;
   }
-  if (EmptyP emr = dynamic_cast<EmptyP>(right.get()); emr != nullptr) {
+  if (OrP orr = dynamic_cast<OrP>(right.get());
+      orr != nullptr && orr->rs.empty()) {
     return right;
-  }
-  if (EpsP epl = dynamic_cast<EpsP>(left.get()); epl != nullptr) {
-    return right;
-  }
-  if (EpsP epr = dynamic_cast<EpsP>(right.get()); epr != nullptr) {
-    return left;
   }
   if (ConcatP conl = dynamic_cast<ConcatP>(left.get()),
               conr = dynamic_cast<ConcatP>(right.get());
@@ -1611,9 +1540,9 @@ Id sortPortToId(SortWP sort, PortId port, Polar polar) {
     return it->second;
   } else {
     if (sort->name == "VarDef" && polar == Polar::Export) {
-      automaton.emplace_back(mkEps(), std::map<Id, RegExpP>());
+      automaton.emplace_back(mkConcat({}), std::map<Id, RegExpP>());
     } else {
-      automaton.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+      automaton.emplace_back(mkOr({}), std::map<Id, RegExpP>());
     }
     return numbering[sp] = automaton.size() - 1;
   }
@@ -1629,7 +1558,7 @@ void addTransition(Id from, Id to, RegExpP ch) {
 }
 
 Id addState() {
-  automaton.emplace_back(mkEmpty(), std::map<Id, RegExpP>());
+  automaton.emplace_back(mkOr({}), std::map<Id, RegExpP>());
   return automaton.size() - 1;
 }
 
