@@ -38,17 +38,26 @@ struct Sort {
 typedef shared_ptr<Sort> SortP;
 typedef Sort *SortWP;
 
+// builtin
+SortWP VarDef;
+SortWP VarUse;
+
 struct Port;
 typedef vector<Port> PortSet;
+
+enum MetaSort { List, Mono };
 
 struct Parameter {
   Id id;
   string name;
+  MetaSort msort;
   SortWP sort;
   FunctionWP mom;
   vector<PortSet> binds;
-  Parameter(Id id, string &&name, SortWP sort):
-    id(id), name(std::move(name)), sort(sort), mom(nullptr) {}
+  vector<PortSet> bindleft;
+  vector<PortSet> bindright;
+  Parameter(Id id, string &&name, MetaSort msort, SortWP sort):
+    id(id), name(std::move(name)), msort(msort), sort(sort), mom(nullptr) {}
 };
 
 typedef Parameter *ParameterP;
@@ -101,6 +110,9 @@ typedef shared_ptr<Expr> ExprP;
 typedef Expr *ExprWP;
 typedef Application *ApplicationP;
 typedef Hole *HoleP;
+struct ListNF;
+typedef shared_ptr<ListNF> ListNFP;
+typedef ListNF *ListNFWP;
 
 struct Expr {
   ApplicationP mom;
@@ -108,6 +120,7 @@ struct Expr {
   size_t depth;
   Expr(): mom(nullptr), self_param(nullptr) {}
   virtual void show(std::ostream &os) const = 0;
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
 };
 
 struct Var: public Expr {
@@ -116,15 +129,27 @@ struct Var: public Expr {
   virtual void show(std::ostream &os) const override {
     os << name;
   }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
+    if (sort == nullptr) {
+      return;
+    }
+    if (sort->name != "VarDef" && sort->name != "VarUse") {
+      fail("typeOf: sort error");
+    }
+  }
 };
 
 typedef Var *VarP;
 
 struct Hole: public Expr {
   Id id;
-  Hole(Id id): Expr(), id(id) {}
+  SortWP sort;
+  Hole(Id id): Expr(), id(id), sort(nullptr) {}
   virtual void show(std::ostream &os) const override {
     os << id;
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
+    this->sort = sort;
   }
 };
 
@@ -134,9 +159,135 @@ struct DefToUse: public Expr {
   virtual void show(std::ostream &os) const override {
     os << "(->use " << hole << ")";
   }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    if (sort != VarUse) {
+      fail("typeOf: sort error");
+    }
+    if (auto it = holes.find(hole); it != holes.end()) {
+      it->second->typeOf(VarDef, holes);
+    } else {
+      fail("typeOf: no such hole");
+    }
+  }
 };
 
 typedef DefToUse *DefToUseP;
+
+struct ListS {
+  ListNFWP mom;
+  ListS(): mom(nullptr) {}
+  virtual void show(std::ostream &os) const = 0;
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
+};
+
+typedef shared_ptr<ListS> ListSP;
+typedef ListS *ListSWP;
+
+// inherite Expr just for convenience
+struct ListNF : Expr {
+  ListSWP moml;
+  vector<ListSP> lists;
+  ListNF(vector<ListSP> &&lists_):
+    Expr(), moml(nullptr), lists(std::move(lists_)) {
+    for (auto s : lists) {
+      s->mom = this;
+    }
+  }
+  virtual void show(std::ostream &os) const override {
+    os << "(append";
+    for (auto l : lists) {
+      os << " ";
+      l->show(os);
+    }
+    os << ")";
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    for (auto l : lists) {
+      l->typeOf(sort, holes);
+    }
+  }
+};
+
+struct ListHole : ListS {
+  Id id;
+  SortWP sort;
+  ListHole(Id id): ListS(), id(id), sort(nullptr) {}
+  virtual void show(std::ostream &os) const override {
+    os << id;
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
+    this->sort = sort;
+  }
+};
+
+struct ListRevHole : ListS {
+  Id id;
+  SortWP sort;
+  ListRevHole(Id id): ListS(), id(id) {}
+  virtual void show(std::ostream &os) const override {
+    os << "(reverse " << id << ")";
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
+    this->sort = sort;
+  }
+};
+
+struct ListSingle : ListS {
+  ExprP expr;
+  ListSingle(ExprP expr): ListS(), expr(expr) {}
+  virtual void show(std::ostream &os) const override {
+    os << "(list ";
+    expr->show(os);
+    os << ")";
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    expr->typeOf(sort, holes);
+  }
+};
+
+struct ListRepeat : ListS {
+  ExprP expr;
+  ListRepeat(ExprP expr): ListS(), expr(expr) {}
+  virtual void show(std::ostream &os) const override {
+    os << "(repeat "; // from Haskell
+    expr->show(os);
+    os << ")";
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    expr->typeOf(sort, holes);
+  }
+};
+
+struct ListMap : ListS {
+  FunctionP func;
+  vector<ListNFP> args;
+  ListMap(FunctionP func_, vector<ListNFP> &&args_):
+    ListS(), func(func_), args(std::move(args_)) {
+    for (auto nf : args) {
+      nf->moml = this;
+    }
+  }
+  virtual void show(std::ostream &os) const override {
+    os << "(mapcar " << func->name;
+    for (auto l : args) {
+      os << " ";
+      l->show(os);
+    }
+    os << ")";
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    auto &params = func->params;
+    if (args.size() != params.size()) {
+      fail("typeOf: wrong argument number");
+    }
+    if (func->sort != sort) {
+      fail("typeOf: sort error");
+    }
+    for (size_t i = 0; i < args.size(); i++) {
+      args[i]->typeOf(params[i].sort, holes);
+    }
+  }
+};
 
 struct Application: public Expr {
   FunctionWP func;
@@ -155,6 +306,22 @@ struct Application: public Expr {
       e->show(os);
     }
     os << ')';
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
+    auto &params = func->params;
+    if (args.size() != params.size()) {
+      fail("typeOf: wrong argument number");
+    }
+    if (func->sort != sort) {
+      fail("typeOf: sort error");
+    }
+    for (size_t i = 0; i < args.size(); i++) {
+      if (ListNFWP l = dynamic_cast<ListNFWP>(args[i].get());
+          (l != NULL) != (params[i].msort == List)) {
+        fail("typeOf: meta-sort error");
+      }
+      args[i]->typeOf(params[i].sort, holes);
+    }
   }
 };
 
@@ -178,29 +345,34 @@ inline ExprP mkDefToUse(Id hole) {
   return shared_ptr<Expr>(p);
 }
 
-void typecheck(ExprP e, const std::map<Id, HoleP> &holes) {
-  if (auto var = dynamic_cast<VarP>(e.get()); var != nullptr) {
-    auto sort = e->self_param->sort;
-    if (sort->name != "VarDef" && sort->name != "VarUse") {
-      fail("typecheck: sort error");
-    }
-  } else if (auto d2u = dynamic_cast<DefToUseP>(e.get()); d2u != nullptr) {
-    if (auto it = holes.find(d2u->hole); it != holes.end()) {
-      if (it->second->self_param->sort->name != "VarDef") {
-        fail("typecheck: not a definitional hole");
-      }
-    } else {
-      fail("typecheck: no such hole");
-    }
-  } else if (auto ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    if (ap->self_param != nullptr &&
-        ap->func->sort != ap->self_param->sort) {
-      fail("typecheck: sort error");
-    }
-    for (auto e0 : ap->args) {
-      typecheck(e0, holes);
-    }
-  }
+inline ExprP mkListNF(vector<ListSP> &&lists) {
+  ListNFWP p = new ListNF(std::move(lists));
+  return shared_ptr<Expr>(p);
+}
+
+inline ListSP mkListHole(Id id) {
+  ListSWP p = new ListHole(id);
+  return shared_ptr<ListS>(p);
+}
+
+inline ListSP mkListRevHole(Id id) {
+  ListSWP p = new ListRevHole(id);
+  return shared_ptr<ListS>(p);
+}
+
+inline ListSP mkListSingle(ExprP expr) {
+  ListSWP p = new ListSingle(expr);
+  return shared_ptr<ListS>(p);
+}
+
+inline ListSP mkListRepeat(ExprP expr) {
+  ListSWP p = new ListRepeat(expr);
+  return shared_ptr<ListS>(p);
+}
+
+inline ListSP mkListMap(FunctionP func, vector<ListNFP> &&args) {
+  ListSWP p = new ListMap(func, std::move(args));
+  return shared_ptr<ListS>(p);
 }
 
 struct Macro {
@@ -226,19 +398,16 @@ struct Macro {
 };
 
 void checkMacro(const Macro &m) {
-  typecheck(m.from, std::map<Id, HoleP>());
-  typecheck(m.to, m.to_holes);
+  // todo
   ApplicationP ap;
   if (ap = dynamic_cast<ApplicationP>(m.from.get()); ap == nullptr) {
     fail("checkMacro: bad LHS");
   }
+  m.from->typeOf(ap->func->sort, std::map<Id, HoleP>());
+  m.to->typeOf(ap->func->sort, m.to_holes);
   for (auto &p : m.to_holes) {
     if (auto it = m.from_holes.find(p.first); it != m.from_holes.end()) {
-      if (p.second->self_param == nullptr) {
-        if (it->second->self_param->sort != ap->func->sort) {
-          fail("checkMacro: sort error");
-        }
-      } else if (p.second->self_param->sort != it->second->self_param->sort) {
+      if (p.second->sort != it->second->sort) {
         fail("checkMacro: sort error");
       }
     } else {
@@ -460,6 +629,9 @@ struct Environment {
   Environment() {
     addSort("VarUse", 1, 0);
     addSort("VarDef", 1, 1);
+    // ...
+    VarUse = findSortException("VarUse");
+    VarDef = findSortException("VarDef");
   }
 } env;
 
@@ -1315,6 +1487,7 @@ void doInfer() {
   for (auto &m : env.pending_macro) {
     generateConstraint(m);
   }
+  std::cerr << solver.nVars() << ' ' << solver.nClauses() << std::endl;
   solver.solve();
   if (solver.okay()) {
     readbackScope();
@@ -1653,7 +1826,10 @@ std::pair<RegExpP, RegExpP> characterize(vector<FunctionWP> &fs) {
 
 // -------- entry --------
 
+#include <chrono>
+
 int main(int argc, char *argv[]) {
+  auto begin = std::chrono::high_resolution_clock::now();
   for (int i = 1; i < argc; i++) {
     std::ifstream fs(argv[i]);
     if (!repl(fs, true)) {
@@ -1663,7 +1839,12 @@ int main(int argc, char *argv[]) {
     fs.close();
   }
   repl(std::cin, false);
+
  end:
+  auto end = std::chrono::high_resolution_clock::now();
+  std::cerr << std::chrono::duration_cast<std::chrono::nanoseconds>(end - begin)
+                   .count()
+            << std::endl;
 }
 
 #undef fail
