@@ -7,6 +7,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -54,8 +55,8 @@ struct Parameter {
   SortWP sort;
   FunctionWP mom;
   vector<PortSet> binds;
-  vector<PortSet> bindleft;
-  vector<PortSet> bindright;
+  vector<vector<PortId>> bind_left;
+  vector<vector<PortId>> bind_right;
   Parameter(Id id, string &&name, MetaSort msort, SortWP sort):
     id(id), name(std::move(name)), msort(msort), sort(sort), mom(nullptr) {}
 };
@@ -113,6 +114,14 @@ typedef Hole *HoleP;
 struct ListNF;
 typedef shared_ptr<ListNF> ListNFP;
 typedef ListNF *ListNFWP;
+struct ListHole;
+typedef ListHole *ListHoleP;
+
+struct HoleContext {
+  std::map<Id, HoleP> holes;
+  std::map<Id, ListHoleP> list_holes;
+  HoleContext() = default;
+};
 
 struct Expr {
   ApplicationP mom;
@@ -121,6 +130,7 @@ struct Expr {
   Expr(): mom(nullptr), self_param(nullptr) {}
   virtual void show(std::ostream &os) const = 0;
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
+  virtual void locateHoles(HoleContext &hc) const = 0;
 };
 
 struct Var: public Expr {
@@ -137,6 +147,7 @@ struct Var: public Expr {
       fail("typeOf: sort error");
     }
   }
+  virtual void locateHoles(HoleContext &) const override {}
 };
 
 typedef Var *VarP;
@@ -150,6 +161,15 @@ struct Hole: public Expr {
   }
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
     this->sort = sort;
+  }
+  virtual void locateHoles(HoleContext &hc) const override {
+    if (auto it = hc.holes.find(id); it != hc.holes.end()) {
+      fail("locateHoles: duplicated hole");
+    }
+    if (auto it = hc.list_holes.find(id); it != hc.list_holes.end()) {
+      fail("locateHoles: duplicated hole");
+    }
+    hc.holes[id] = const_cast<HoleP>(this);
   }
 };
 
@@ -169,6 +189,7 @@ struct DefToUse: public Expr {
       fail("typeOf: no such hole");
     }
   }
+  virtual void locateHoles(HoleContext &) const override {}
 };
 
 typedef DefToUse *DefToUseP;
@@ -178,6 +199,7 @@ struct ListS {
   ListS(): mom(nullptr) {}
   virtual void show(std::ostream &os) const = 0;
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
+  virtual void locateHoles(HoleContext &hc) const = 0;
 };
 
 typedef shared_ptr<ListS> ListSP;
@@ -206,29 +228,32 @@ struct ListNF : Expr {
       l->typeOf(sort, holes);
     }
   }
+  virtual void locateHoles(HoleContext &hc) const override {
+    for (auto l : lists) {
+      l->locateHoles(hc);
+    }
+  }
 };
 
 struct ListHole : ListS {
   Id id;
+  bool rev;
   SortWP sort;
-  ListHole(Id id): ListS(), id(id), sort(nullptr) {}
+  ListHole(Id id, bool rev): ListS(), id(id), rev(rev), sort(nullptr) {}
   virtual void show(std::ostream &os) const override {
     os << id;
   }
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
     this->sort = sort;
   }
-};
-
-struct ListRevHole : ListS {
-  Id id;
-  SortWP sort;
-  ListRevHole(Id id): ListS(), id(id) {}
-  virtual void show(std::ostream &os) const override {
-    os << "(reverse " << id << ")";
-  }
-  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
-    this->sort = sort;
+  virtual void locateHoles(HoleContext &hc) const override {
+    if (auto it = hc.holes.find(id); it != hc.holes.end()) {
+      fail("locateHoles: duplicated hole");
+    }
+    if (auto it = hc.list_holes.find(id); it != hc.list_holes.end()) {
+      fail("locateHoles: duplicated hole");
+    }
+    hc.list_holes[id] = const_cast<ListHoleP>(this);
   }
 };
 
@@ -243,6 +268,9 @@ struct ListSingle : ListS {
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
     expr->typeOf(sort, holes);
   }
+  virtual void locateHoles(HoleContext &hc) const override {
+    expr->locateHoles(hc);
+  }
 };
 
 struct ListRepeat : ListS {
@@ -256,12 +284,13 @@ struct ListRepeat : ListS {
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) override {
     expr->typeOf(sort, holes);
   }
+  virtual void locateHoles(HoleContext &) const override {}
 };
 
 struct ListMap : ListS {
-  FunctionP func;
+  FunctionWP func;
   vector<ListNFP> args;
-  ListMap(FunctionP func_, vector<ListNFP> &&args_):
+  ListMap(FunctionWP func_, vector<ListNFP> &&args_):
     ListS(), func(func_), args(std::move(args_)) {
     for (auto nf : args) {
       nf->moml = this;
@@ -285,6 +314,11 @@ struct ListMap : ListS {
     }
     for (size_t i = 0; i < args.size(); i++) {
       args[i]->typeOf(params[i].sort, holes);
+    }
+  }
+  virtual void locateHoles(HoleContext &hc) const override {
+    for (auto l : args) {
+      l->locateHoles(hc);
     }
   }
 };
@@ -323,6 +357,11 @@ struct Application: public Expr {
       args[i]->typeOf(params[i].sort, holes);
     }
   }
+  virtual void locateHoles(HoleContext &hc) const override {
+    for (auto e0 : args) {
+      e0->locateHoles(hc);
+    }
+  }
 };
 
 inline ExprP mkVar(string &&name) {
@@ -350,13 +389,8 @@ inline ExprP mkListNF(vector<ListSP> &&lists) {
   return shared_ptr<Expr>(p);
 }
 
-inline ListSP mkListHole(Id id) {
-  ListSWP p = new ListHole(id);
-  return shared_ptr<ListS>(p);
-}
-
-inline ListSP mkListRevHole(Id id) {
-  ListSWP p = new ListRevHole(id);
+inline ListSP mkListHole(Id id, bool rev) {
+  ListSWP p = new ListHole(id, rev);
   return shared_ptr<ListS>(p);
 }
 
@@ -370,7 +404,7 @@ inline ListSP mkListRepeat(ExprP expr) {
   return shared_ptr<ListS>(p);
 }
 
-inline ListSP mkListMap(FunctionP func, vector<ListNFP> &&args) {
+inline ListSP mkListMap(FunctionWP func, vector<ListNFP> &&args) {
   ListSWP p = new ListMap(func, std::move(args));
   return shared_ptr<ListS>(p);
 }
@@ -378,40 +412,41 @@ inline ListSP mkListMap(FunctionP func, vector<ListNFP> &&args) {
 struct Macro {
   ExprP from;
   ExprP to;
-  std::map<Id, HoleP> from_holes;
-  std::map<Id, HoleP> to_holes;
-
-  void locateHoles(ExprP e, std::map<Id, HoleP> &m) {
-    if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-      for (auto e0 : ap->args) {
-        locateHoles(e0, m);
-      }
-    } else if (HoleP hp = dynamic_cast<HoleP>(e.get()); hp != nullptr) {
-      m[hp->id] = hp;
-    }
-  }
+  HoleContext from_hc;
+  HoleContext to_hc;
 
   Macro(ExprP from, ExprP to): from(from), to(to) {
-    locateHoles(from, from_holes);
-    locateHoles(to, to_holes);
+    from->locateHoles(from_hc);
+    to->locateHoles(to_hc);
   }
 };
 
 void checkMacro(const Macro &m) {
-  // todo
+  // we require LHS to be an compound; it eases type-checking, and I do not
+  // think anyone would want a hole as LHS.
   ApplicationP ap;
   if (ap = dynamic_cast<ApplicationP>(m.from.get()); ap == nullptr) {
     fail("checkMacro: bad LHS");
   }
   m.from->typeOf(ap->func->sort, std::map<Id, HoleP>());
-  m.to->typeOf(ap->func->sort, m.to_holes);
-  for (auto &p : m.to_holes) {
-    if (auto it = m.from_holes.find(p.first); it != m.from_holes.end()) {
+  m.to->typeOf(ap->func->sort, m.to_hc.holes);
+  for (auto &p : m.to_hc.holes) {
+    if (auto it = m.from_hc.holes.find(p.first); it != m.from_hc.holes.end()) {
       if (p.second->sort != it->second->sort) {
         fail("checkMacro: sort error");
       }
     } else {
       fail("checkMacro: invented hole");
+    }
+  }
+  for (auto &p : m.to_hc.list_holes) {
+    if (auto it = m.from_hc.list_holes.find(p.first);
+        it != m.from_hc.list_holes.end()) {
+      if (p.second->sort != it->second->sort) {
+        fail("checkMacro: sort error");
+      }
+    } else {
+      fail("checkMacro: invented list hole");
     }
   }
 }
@@ -477,11 +512,12 @@ struct Environment {
   }
 
   bool addFunction(string &&name, const string &sort,
-                   vector<std::pair<string, string>> &&param) {
+                   vector<std::tuple<string, MetaSort, string>> &&param) {
     vector<Parameter> params;
     for (size_t i = 0; i < param.size(); i++) {
-      params.emplace_back(fresh(), std::move(param[i].first),
-                          findSortException(param[i].second));
+      params.emplace_back(fresh(), std::move(std::get<0>(param[i])),
+                          std::get<1>(param[i]),
+                          findSortException(std::get<2>(param[i])));
     }
     string name1 = name;
     auto p = funcs.emplace(name1,
@@ -504,7 +540,9 @@ struct Environment {
   void addScope(const string &name,
                 const vector<TextPortSet> &imports,
                 const vector<TextPortSet> &exports,
-                const vector<std::pair<TextPort, TextPort>> &binds) {
+                const vector<std::pair<TextPort, TextPort>> &binds,
+                const vector<std::pair<TextPort, PortId>> &bind_left,
+                const vector<std::pair<TextPort, PortId>> &bind_right) {
     auto f = findFunctionException(name);
     if (f->scoped) {
       fail("addScope: already specified scope");
@@ -514,6 +552,10 @@ struct Environment {
     f->exports = vector<PortSet>(f->sort->n_export);
     for (auto &p : f->params) {
       p.binds = vector<PortSet>(p.sort->n_import);
+      if (p.msort == List) {
+        p.bind_left = vector<vector<PortId>>(p.sort->n_import);
+        p.bind_right = vector<vector<PortId>>(p.sort->n_import);
+      }
     }
 
     for (size_t i = 0; i < imports.size(); i++) {
@@ -548,6 +590,24 @@ struct Environment {
         fail("addScope: invalid bind");
       }
       from->binds[p.first.port].emplace_back(to, p.second.port);
+    }
+    for (auto &p : bind_left) {
+      auto param = f->findParameter(p.first.param);
+      if (param->msort != List ||
+          p.first.port >= param->sort->n_import ||
+          p.second >= param->sort->n_export) {
+        fail("addScope: invalid bind-left");
+      }
+      param->bind_left[p.first.port].emplace_back(p.second);
+    }
+    for (auto &p : bind_right) {
+      auto param = f->findParameter(p.first.param);
+      if (param->msort != List ||
+          p.first.port >= param->sort->n_import ||
+          p.second >= param->sort->n_export) {
+        fail("addScope: invalid bind-right");
+      }
+      param->bind_right[p.first.port].emplace_back(p.second);
     }
     f->scoped = 1;
   }
@@ -614,6 +674,30 @@ struct Environment {
             }
           }
         }
+        first = true;
+        for (auto &p : f.second->params) {
+          for (size_t i = 0; i < p.bind_left.size(); i++) {
+            for (auto port : p.bind_left[i]) {
+              if (first) {
+                os << " :bind-left";
+                first = false;
+              }
+              os << " (" << p.name << " " << i << " " << port << ")";
+            }
+          }
+        }
+        first = true;
+        for (auto &p : f.second->params) {
+          for (size_t i = 0; i < p.bind_right.size(); i++) {
+            for (auto port : p.bind_right[i]) {
+              if (first) {
+                os << " :bind-right";
+                first = false;
+              }
+              os << " (" << p.name << " " << i << " " << port << ")";
+            }
+          }
+        }
         os << ")" << std::endl;
       }
     }
@@ -672,6 +756,8 @@ void readExactChar(std::istream &is, char c) {
   }
 }
 
+ListSP readListS(std::istream &is);
+
 ExprP readExpr(std::istream &is) {
   auto c = getcharSkip(is);
 
@@ -692,6 +778,13 @@ ExprP readExpr(std::istream &is) {
       } catch (...) {
         fail("readExpr: expecting hole");
       }
+    } else if (func == "append") {
+      vector<ListSP> lists;
+      while ((c = getcharSkip(is)) != ')') {
+        is.putback(c);
+        lists.emplace_back(readListS(is));
+      }
+      return mkListNF(std::move(lists));
     } else {
       vector<ExprP> args;
       while ((c = getcharSkip(is)) != ')') {
@@ -733,6 +826,72 @@ uint readUInt(std::istream &is) {
     }
   } catch (...) {
     fail("readUInt: not a positive number");
+  }
+}
+
+uint64_t readULong(std::istream &is) {
+  string &&x = readString(is);
+  size_t pos;
+  try {
+    long n = std::stoul(x, &pos);
+    if (pos == x.size() && n >= 0) {
+      return n;
+    } else {
+      fail("readULong: not a number");
+    }
+  } catch (...) {
+    fail("readULong: not a number");
+  }
+}
+
+ListNFP readListNF(std::istream &is) {
+  readExactChar(is, '(');
+  string &&prim = readString(is);
+  if (prim != "append") {
+    fail("readListNF: expecting 'append'");
+  }
+  vector<ListSP> lists;
+  char c;
+  while ((c = getcharSkip(is)) != ')') {
+    is.putback(c);
+    lists.emplace_back(readListS(is));
+  }
+  return std::make_shared<ListNF>(std::move(lists));
+}
+
+ListSP readListS(std::istream &is) {
+  auto c = getcharSkip(is);
+
+  switch (c) {
+  case '(': {
+    string &&prim = readString(is);
+    if (prim == "reverse") {
+      auto id = readULong(is);
+      readExactChar(is, ')');
+      return mkListHole(id, true);
+    } else if (prim == "list") {
+      auto expr = readExpr(is);
+      readExactChar(is, ')');
+      return mkListSingle(expr);
+    } else if (prim == "repeat") {
+      auto expr = readExpr(is);
+      readExactChar(is, ')');
+      return mkListRepeat(expr);
+    } else if (prim == "map") {
+      string &&func = readString(is);
+      vector<ListNFP> args;
+      while ((c = getcharSkip(is)) != ')') {
+        is.putback(c);
+        args.emplace_back(readListNF(is));
+      }
+      return mkListMap(env.findFunctionException(func), std::move(args));
+    } else {
+      fail("readListS: unknown list primitive");
+    }
+  }
+  default:
+    is.putback(c);
+    return mkListHole(readULong(is), false);
   }
 }
 
@@ -780,13 +939,20 @@ void readDefsort(std::istream &is) {
 void readDefun(std::istream &is) {
   string &&name = readString(is);
   char c;
-  vector<std::pair<string, string>> param;
+  vector<std::tuple<string, MetaSort, string>> param;
   while ((c = getcharSkip(is)) == '(') {
     readExactChar(is, ':');
     string &&name = readString(is);
     string &&sort = readString(is);
-    param.emplace_back(std::move(name), std::move(sort));
     readExactChar(is, ')');
+    char star = getcharSkip(is);
+    MetaSort ms = Mono;
+    if (star == '*') {
+      ms = List;
+    } else {
+      is.putback(star);
+    }
+    param.emplace_back(std::move(name), ms, std::move(sort));
   }
   is.putback(c);
   readExactString(is, ":sort");
@@ -808,6 +974,8 @@ void readDefscope(std::istream &is) {
   vector<TextPortSet> imports;
   vector<TextPortSet> exports;
   vector<std::pair<TextPort, TextPort>> binds;
+  vector<std::pair<TextPort, PortId>> bind_left;
+  vector<std::pair<TextPort, PortId>> bind_right;
   string name = readString(is);
   char c;
   while ((c = getcharSkip(is)) != ')') {
@@ -843,12 +1011,30 @@ void readDefscope(std::istream &is) {
         readExactChar(is, ')');
       }
       is.putback(c);
+    } else if (which == ":bind-left") {
+      while ((c = getcharSkip(is)) == '(') {
+        string &&param = readString(is);
+        PortId from = readUInt(is);
+        PortId to = readUInt(is);
+        bind_left.emplace_back(TextPort(std::move(param), from), to);
+        readExactChar(is, ')');
+      }
+      is.putback(c);
+    } else if (which == ":bind-right") {
+      while ((c = getcharSkip(is)) == '(') {
+        string &&param = readString(is);
+        PortId from = readUInt(is);
+        PortId to = readUInt(is);
+        bind_right.emplace_back(TextPort(std::move(param), from), to);
+        readExactChar(is, ')');
+      }
+      is.putback(c);
     } else {
       fail("readDefscope: bad syntax");
     }
   }
   is.putback(c);
-  env.addScope(name, imports, exports, binds);
+  env.addScope(name, imports, exports, binds, bind_left, bind_right);
 }
 
 void readDefmacro(std::istream &is) {
