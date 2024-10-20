@@ -46,7 +46,7 @@ SortWP VarUse;
 struct Port;
 typedef vector<Port> PortSet;
 
-enum MetaSort { List, Mono };
+enum class MetaSort { List, Mono };
 
 struct Parameter {
   Id id;
@@ -106,56 +106,84 @@ struct Function {
 
 struct Expr;
 struct Application;
+struct DefToUse;
 struct Hole;
 typedef shared_ptr<Expr> ExprP;
 typedef Expr *ExprWP;
 typedef Application *ApplicationP;
 typedef Hole *HoleP;
+typedef DefToUse *DefToUseP;
 struct ListNF;
 typedef shared_ptr<ListNF> ListNFP;
 typedef ListNF *ListNFWP;
-struct ListHole;
-typedef ListHole *ListHoleP;
 
 struct HoleContext {
   std::map<Id, HoleP> holes;
-  std::map<Id, ListHoleP> list_holes;
   HoleContext() = default;
 };
 
 struct Expr {
-  ApplicationP mom;
-  ParameterP self_param;
+  ExprWP mom;
   size_t depth;
+  ParameterP self_param;
   Expr(): mom(nullptr), self_param(nullptr) {}
   virtual void show(std::ostream &os) const = 0;
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
   virtual void locateHoles(HoleContext &hc) const = 0;
+  virtual void computeDepth(size_t d) = 0;
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const = 0;
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const = 0;
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const = 0;
 };
 
 struct Var: public Expr {
   string name;
+  SortWP sort;
   Var(string &&name): Expr(), name(std::move(name)) {}
   virtual void show(std::ostream &os) const override {
     os << name;
   }
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
-    if (sort == nullptr) {
-      return;
-    }
     if (sort->name != "VarDef" && sort->name != "VarUse") {
       fail("typeOf: sort error");
     }
+    this->sort = sort;
   }
   virtual void locateHoles(HoleContext &) const override {}
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const override {
+    if (sort == VarDef) {
+      if (fdef.find(name) != fdef.end()) {
+        fail("findFreshDef: fresh identifiers with same name");
+      }
+      fdef[name] = const_cast<Var *>(this);
+    }
+  }
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const override {
+    if (sort == VarUse) {
+      if (auto it = fdef.find(name); it != fdef.end()) {
+        // todo
+      } else {
+        fail("findFreshUse: unbound identifier in rhs");
+      }
+    }
+  }
+  virtual void findDefToUse(vector<DefToUseP> &) const override {}
 };
 
 typedef Var *VarP;
 
-struct Hole: public Expr {
+struct ListS: public Expr {
+  ListS(): Expr() {}
+};
+
+struct Hole: public ListS { // miserably...
   Id id;
   SortWP sort;
-  Hole(Id id): Expr(), id(id), sort(nullptr) {}
+  enum class Cat { Norm, List, Rev } cat;
+  Hole(Id id, Cat cat): ListS(), id(id), sort(nullptr), cat(cat) {}
   virtual void show(std::ostream &os) const override {
     os << id;
   }
@@ -166,11 +194,14 @@ struct Hole: public Expr {
     if (auto it = hc.holes.find(id); it != hc.holes.end()) {
       fail("locateHoles: duplicated hole");
     }
-    if (auto it = hc.list_holes.find(id); it != hc.list_holes.end()) {
-      fail("locateHoles: duplicated hole");
-    }
     hc.holes[id] = const_cast<HoleP>(this);
   }
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &) const override {}
+  virtual void findFreshUse(std::map<string, ExprWP> &) const override {}
+  virtual void findDefToUse(vector<DefToUseP> &) const override {}
 };
 
 struct DefToUse: public Expr {
@@ -190,27 +221,24 @@ struct DefToUse: public Expr {
     }
   }
   virtual void locateHoles(HoleContext &) const override {}
-};
-
-typedef DefToUse *DefToUseP;
-
-struct ListS {
-  ListNFWP mom;
-  ListS(): mom(nullptr) {}
-  virtual void show(std::ostream &os) const = 0;
-  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &holes) = 0;
-  virtual void locateHoles(HoleContext &hc) const = 0;
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &) const override {}
+  virtual void findFreshUse(std::map<string, ExprWP> &) const override {}
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const override {
+    d2u.emplace_back(const_cast<DefToUseP>(this));
+  }
 };
 
 typedef shared_ptr<ListS> ListSP;
 typedef ListS *ListSWP;
 
 // inherite Expr just for convenience
-struct ListNF : Expr {
-  ListSWP moml;
+struct ListNF: public Expr {
   vector<ListSP> lists;
   ListNF(vector<ListSP> &&lists_):
-    Expr(), moml(nullptr), lists(std::move(lists_)) {
+    Expr(), lists(std::move(lists_)) {
     for (auto s : lists) {
       s->mom = this;
     }
@@ -233,31 +261,30 @@ struct ListNF : Expr {
       l->locateHoles(hc);
     }
   }
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+    for (auto l : lists) {
+      l->computeDepth(d + 1);
+    }
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const override {
+    for (auto l : lists) {
+      l->findFreshDef(fdef);
+    }
+  }
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const override {
+    for (auto l : lists) {
+      l->findFreshUse(fdef);
+    }
+  }
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const override {
+    for (auto l : lists) {
+      l->findDefToUse(d2u);
+    }
+  }
 };
 
-struct ListHole : ListS {
-  Id id;
-  bool rev;
-  SortWP sort;
-  ListHole(Id id, bool rev): ListS(), id(id), rev(rev), sort(nullptr) {}
-  virtual void show(std::ostream &os) const override {
-    os << id;
-  }
-  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
-    this->sort = sort;
-  }
-  virtual void locateHoles(HoleContext &hc) const override {
-    if (auto it = hc.holes.find(id); it != hc.holes.end()) {
-      fail("locateHoles: duplicated hole");
-    }
-    if (auto it = hc.list_holes.find(id); it != hc.list_holes.end()) {
-      fail("locateHoles: duplicated hole");
-    }
-    hc.list_holes[id] = const_cast<ListHoleP>(this);
-  }
-};
-
-struct ListSingle : ListS {
+struct ListSingle: public ListS {
   ExprP expr;
   ListSingle(ExprP expr): ListS(), expr(expr) {}
   virtual void show(std::ostream &os) const override {
@@ -271,9 +298,24 @@ struct ListSingle : ListS {
   virtual void locateHoles(HoleContext &hc) const override {
     expr->locateHoles(hc);
   }
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+    expr->computeDepth(d + 1);
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const override {
+    expr->findFreshDef(fdef);
+  }
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const override {
+    expr->findFreshUse(fdef);
+  }
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const override {
+    expr->findDefToUse(d2u);
+  }
 };
 
-struct ListRepeat : ListS {
+typedef ListSingle *ListSingleP;
+
+struct ListRepeat: public ListS {
   ExprP expr;
   ListRepeat(ExprP expr): ListS(), expr(expr) {}
   virtual void show(std::ostream &os) const override {
@@ -285,15 +327,21 @@ struct ListRepeat : ListS {
     expr->typeOf(sort, holes);
   }
   virtual void locateHoles(HoleContext &) const override {}
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &) const override {}
+  virtual void findFreshUse(std::map<string, ExprWP> &) const override {}
+  virtual void findDefToUse(vector<DefToUseP> &) const override {}
 };
 
-struct ListMap : ListS {
+struct ListMap: public ListS {
   FunctionWP func;
   vector<ListNFP> args;
   ListMap(FunctionWP func_, vector<ListNFP> &&args_):
     ListS(), func(func_), args(std::move(args_)) {
     for (auto nf : args) {
-      nf->moml = this;
+      nf->mom = this;
     }
   }
   virtual void show(std::ostream &os) const override {
@@ -314,6 +362,7 @@ struct ListMap : ListS {
     }
     for (size_t i = 0; i < args.size(); i++) {
       args[i]->typeOf(params[i].sort, holes);
+      args[i]->self_param = &params[i];
     }
   }
   virtual void locateHoles(HoleContext &hc) const override {
@@ -321,7 +370,30 @@ struct ListMap : ListS {
       l->locateHoles(hc);
     }
   }
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+    for (auto l : args) {
+      l->computeDepth(d + 1);
+    }
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const override {
+    for (auto l : args) {
+      l->findFreshDef(fdef);
+    }
+  }
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const override {
+    for (auto l : args) {
+      l->findFreshUse(fdef);
+    }
+  }
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const override {
+    for (auto l : args) {
+      l->findDefToUse(d2u);
+    }
+  }
 };
+
+typedef ListMap *ListMapP;
 
 struct Application: public Expr {
   FunctionWP func;
@@ -330,7 +402,6 @@ struct Application: public Expr {
     Expr(),func(func_), args(std::move(args_)) {
     for (size_t i = 0; i < args.size(); i++) {
       args[i]->mom = this;
-      args[i]->self_param = &func->params[i];
     }
   }
   virtual void show(std::ostream &os) const override {
@@ -351,15 +422,37 @@ struct Application: public Expr {
     }
     for (size_t i = 0; i < args.size(); i++) {
       if (ListNFWP l = dynamic_cast<ListNFWP>(args[i].get());
-          (l != NULL) != (params[i].msort == List)) {
+          (l != nullptr) != (params[i].msort == MetaSort::List)) {
         fail("typeOf: meta-sort error");
       }
       args[i]->typeOf(params[i].sort, holes);
+      args[i]->self_param = &params[i];
     }
   }
   virtual void locateHoles(HoleContext &hc) const override {
     for (auto e0 : args) {
       e0->locateHoles(hc);
+    }
+  }
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+    for (auto e0 : args) {
+      e0->computeDepth(d + 1);
+    }
+  }
+  virtual void findFreshDef(std::map<string, ExprWP> &fdef) const override {
+    for (auto e0 : args) {
+      e0->findFreshDef(fdef);
+    }
+  }
+  virtual void findFreshUse(std::map<string, ExprWP> &fdef) const override {
+    for (auto e0 : args) {
+      e0->findFreshUse(fdef);
+    }
+  }
+  virtual void findDefToUse(vector<DefToUseP> &d2u) const override {
+    for (auto e0 : args) {
+      e0->findDefToUse(d2u);
     }
   }
 };
@@ -369,9 +462,14 @@ inline ExprP mkVar(string &&name) {
   return shared_ptr<Expr>(p);
 }
 
-inline ExprP mkHole(Id id) {
-  Hole *p = new Hole(id);
+inline ExprP mkHole(Id id, Hole::Cat cat) {
+  Hole *p = new Hole(id, cat);
   return shared_ptr<Expr>(p);
+}
+
+inline ListSP mkListHole(Id id, Hole::Cat cat) {
+  Hole *p = new Hole(id, cat);
+  return shared_ptr<ListS>(p);
 }
 
 inline ExprP mkFunc(FunctionWP func, vector<ExprP> &&args) {
@@ -387,11 +485,6 @@ inline ExprP mkDefToUse(Id hole) {
 inline ExprP mkListNF(vector<ListSP> &&lists) {
   ListNFWP p = new ListNF(std::move(lists));
   return shared_ptr<Expr>(p);
-}
-
-inline ListSP mkListHole(Id id, bool rev) {
-  ListSWP p = new ListHole(id, rev);
-  return shared_ptr<ListS>(p);
 }
 
 inline ListSP mkListSingle(ExprP expr) {
@@ -434,19 +527,12 @@ void checkMacro(const Macro &m) {
     if (auto it = m.from_hc.holes.find(p.first); it != m.from_hc.holes.end()) {
       if (p.second->sort != it->second->sort) {
         fail("checkMacro: sort error");
+      } else if ((p.second->cat == Hole::Cat::Norm) !=
+                 (it->second->cat == Hole::Cat::Norm)) {
+        fail("checkMacro: meta-sort error");
       }
     } else {
       fail("checkMacro: invented hole");
-    }
-  }
-  for (auto &p : m.to_hc.list_holes) {
-    if (auto it = m.from_hc.list_holes.find(p.first);
-        it != m.from_hc.list_holes.end()) {
-      if (p.second->sort != it->second->sort) {
-        fail("checkMacro: sort error");
-      }
-    } else {
-      fail("checkMacro: invented list hole");
     }
   }
 }
@@ -552,7 +638,7 @@ struct Environment {
     f->exports = vector<PortSet>(f->sort->n_export);
     for (auto &p : f->params) {
       p.binds = vector<PortSet>(p.sort->n_import);
-      if (p.msort == List) {
+      if (p.msort == MetaSort::List) {
         p.bind_left = vector<vector<PortId>>(p.sort->n_import);
         p.bind_right = vector<vector<PortId>>(p.sort->n_import);
       }
@@ -593,7 +679,7 @@ struct Environment {
     }
     for (auto &p : bind_left) {
       auto param = f->findParameter(p.first.param);
-      if (param->msort != List ||
+      if (param->msort != MetaSort::List ||
           p.first.port >= param->sort->n_import ||
           p.second >= param->sort->n_export) {
         fail("addScope: invalid bind-left");
@@ -602,7 +688,7 @@ struct Environment {
     }
     for (auto &p : bind_right) {
       auto param = f->findParameter(p.first.param);
-      if (param->msort != List ||
+      if (param->msort != MetaSort::List ||
           p.first.port >= param->sort->n_import ||
           p.second >= param->sort->n_export) {
         fail("addScope: invalid bind-right");
@@ -802,7 +888,7 @@ ExprP readExpr(std::istream &is) {
     try {
       Id id = std::stoul(s, &pos);
       if (pos == s.size()) {
-        return mkHole(id);
+        return mkHole(id, Hole::Cat::Norm);
       } else {
         return mkVar(std::move(s));
       }
@@ -868,7 +954,7 @@ ListSP readListS(std::istream &is) {
     if (prim == "reverse") {
       auto id = readULong(is);
       readExactChar(is, ')');
-      return mkListHole(id, true);
+      return mkListHole(id, Hole::Cat::Rev);
     } else if (prim == "list") {
       auto expr = readExpr(is);
       readExactChar(is, ')');
@@ -891,7 +977,7 @@ ListSP readListS(std::istream &is) {
   }
   default:
     is.putback(c);
-    return mkListHole(readULong(is), false);
+    return mkListHole(readULong(is), Hole::Cat::List);
   }
 }
 
@@ -946,9 +1032,9 @@ void readDefun(std::istream &is) {
     string &&sort = readString(is);
     readExactChar(is, ')');
     char star = getcharSkip(is);
-    MetaSort ms = Mono;
+    MetaSort ms = MetaSort::Mono;
     if (star == '*') {
-      ms = List;
+      ms = MetaSort::List;
     } else {
       is.putback(star);
     }
@@ -1144,6 +1230,15 @@ bool repl(std::istream &is, bool quiet) {
 
 enum class Polar { Import, Export };
 
+enum class Orient { Left, Right, Same };
+
+struct LCA {
+  Orient o;
+  ApplicationP high;
+  ListMapP low;
+  LCA(Orient o, ApplicationP high, ListMapP low): o(o), high(high), low(low) {}
+};
+
 struct PortLoc {
   ExprWP e;
   Polar polar;
@@ -1162,43 +1257,72 @@ struct PortLoc {
     e(e), polar(polar), port(port) {}
 };
 
-ApplicationP lca(ExprWP e1, ExprWP e2) {
+LCA lca(ExprWP e1, ExprWP e2) {
+  if (e1 == e2) { // bind-left/right
+    ApplicationP high;
+    while (true) {
+      e1 = e1->mom;
+      if (auto high0 = dynamic_cast<ApplicationP>(e1); e1 != nullptr) {
+        high = high0;
+        break;
+      }
+    }
+    return LCA(Orient::Same, high, nullptr);
+  }
   size_t d1 = e1->depth;
   size_t d2 = e2->depth;
-  if (d1 > d2) {
-    auto t1 = e1;
-    e1 = e2;
-    e2 = t1;
-    auto t2 = d1;
-    d1 = d2;
-    d2 = t2;
+  for (; d1 > d2; d1--) {
+    e1 = e1->mom;
   }
   for (; d2 > d1; d2--) {
     e2 = e2->mom;
   }
+  ExprWP e1_o, e2_o;
   while (e1 != e2) {
+    e1_o = e1;
+    e2_o = e2;
     e1 = e1->mom;
     e2 = e2->mom;
   }
-  return dynamic_cast<ApplicationP>(e1);
+  if (auto ap = dynamic_cast<ApplicationP>(e1); ap != nullptr) {
+    return LCA(Orient::Same, ap, nullptr);
+  } else if (auto nf = dynamic_cast<ListNFWP>(e1); nf != nullptr) {
+    Orient o;
+    for (auto l : nf->lists) {
+      if (l.get() == e1_o) {
+        o = Orient::Left;
+        break;
+      } else if (l.get() == e2_o) {
+        o = Orient::Right;
+        break;
+      }
+    }
+    for (ExprWP e0 = nf;
+         (ap = dynamic_cast<ApplicationP>(e0)) == nullptr;
+         e0 = e0->mom)
+      ;
+    return LCA(o, ap, nullptr);
+  } else if (auto mp = dynamic_cast<ListMapP>(e1); mp != nullptr) {
+    for (ExprWP e0 = mp;
+         (ap = dynamic_cast<ApplicationP>(e0)) == nullptr;
+         e0 = e0->mom)
+      ;
+    return LCA(Orient::Same, ap, mp);
+  } else {
+    fail("lca: this should not happend. Check it");
+  }
 }
 
 struct PortPath {
   PortLoc from;
   PortLoc to;
-  ApplicationP lca;
   bool operator<(const PortPath &other) const {
     return from < other.from || (from == other.from && to < other.to);
   }
-  PortPath(const PortLoc &from, const PortLoc &to, ApplicationP lca):
-    from(from), to(to), lca(lca) {}
-  PortPath(const PortLoc &from, const PortLoc &to):
-    from(from), to(to) {
-    lca = ::lca(from.e, to.e);
-  }
+  PortPath(const PortLoc &from, const PortLoc &to): from(from), to(to) {}
 };
 
-enum class RuleType { Import, Export, Bind };
+enum class RuleType { Import, Export, Bind, BindLeft, BindRight };
 
 struct Rule {
   RuleType type;
@@ -1218,22 +1342,30 @@ struct Rule {
                  (from == other.from &&
                   to < other.to)))))));
   }
-  Rule(RuleType type, FunctionWP func, PortId port, Port &&from, Port &&to):
+  Rule(RuleType type, FunctionWP func, PortId port, Port from, Port to):
     type(type), func(func), port(port), from(std::move(from)), to(std::move(to)) {}
 };
 
-Rule Import(Port &&from, FunctionWP func, PortId to) {
-  auto from1 = from;
-  return Rule(RuleType::Import, func, to, std::move(from1), std::move(from));
+Rule Import(Port from, FunctionWP func, PortId to) {
+  return Rule(RuleType::Import, func, to, from, from);
 }
 
-Rule Export(FunctionWP func, PortId from, Port &&to) {
-  auto to1 = to;
-  return Rule(RuleType::Export, func, from, std::move(to1), std::move(to));
+Rule Export(FunctionWP func, PortId from, Port to) {
+  return Rule(RuleType::Export, func, from, to, to);
 }
 
-Rule Bind(Port &&from, Port &&to) {
-  return Rule(RuleType::Bind, from.param->mom, 0, std::move(from), std::move(to));
+Rule Bind(Port from, Port to) {
+  return Rule(RuleType::Bind, from.param->mom, 0, from, to);
+}
+
+Rule BindLeft(Port from, PortId to) {
+  return Rule(RuleType::BindLeft, from.param->mom, 0,
+              from, Port(from.param, to));
+}
+
+Rule BindRight(Port from, PortId to) {
+  return Rule(RuleType::BindRight, from.param->mom, 0,
+              from, Port(from.param, to));
 }
 
 #include "minisat/core/Solver.h"
@@ -1244,7 +1376,18 @@ std::map<Rule, Minisat::Var> rule_var;
 std::map<PortPath, Minisat::Var> path_var;
 Minisat::Solver *solver;
 
+Minisat::Var True;
+
 bool hasPort(const PortSet &s, const Port &p) {
+  for (auto &q : s) {
+    if (p == q) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool hasPortId(const vector<PortId> &s, PortId p) {
   for (auto &q : s) {
     if (p == q) {
       return true;
@@ -1282,6 +1425,18 @@ Minisat::Var ruleToVar(const Rule &r) {
           solver->addClause(mkLit(var, true));
         }
         break;
+      case RuleType::BindLeft:
+        if (hasPortId(r.from.param->bind_left[r.from.port], r.to.port)) {
+          solver->addClause(mkLit(var, false));
+        } else {
+          solver->addClause(mkLit(var, true));
+        }
+      case RuleType::BindRight:
+        if (hasPortId(r.from.param->bind_right[r.from.port], r.to.port)) {
+          solver->addClause(mkLit(var, false));
+        } else {
+          solver->addClause(mkLit(var, true));
+        }
       }
     }
     rule_var[r] = var;
@@ -1289,21 +1444,9 @@ Minisat::Var ruleToVar(const Rule &r) {
   }
 }
 
-Port portLocToPort(const PortLoc &pl) {
-  return Port(pl.e->self_param, pl.port);
-}
-
-// p iff q11 /\ q12 \/ q21 /\ q22 \/ ...
-void addIff(Minisat::Var p,
-            const vector<std::pair<Minisat::Var, Minisat::Var>> &q) {
-  for (auto &q1q2 : q) {
-    // a /\ b \/ c /\ d -> e
-    // a /\ b -> e, c /\ d -> e
-    // ~a \/ ~b \/ e
-    solver->addClause(mkLit(p, false),
-                      mkLit(q1q2.first, true),
-                      mkLit(q1q2.second, true));
-  }
+// p only if q11 /\ q12 \/ q21 /\ q22 \/ ...
+void addImply(Minisat::Var p,
+              const vector<std::pair<Minisat::Var, Minisat::Var>> &q) {
   // e -> a /\ b \/ c /\ d
   // ~e \/ a/\b \/ c/\d
   Minisat::vec<Minisat::Lit> defs;
@@ -1323,6 +1466,24 @@ void addIff(Minisat::Var p,
   solver->addClause(defs);
 }
 
+void addImply(const vector<std::pair<Minisat::Var, Minisat::Var>> &q,
+              Minisat::Var p) {
+  for (auto &q1q2 : q) {
+    // a /\ b \/ c /\ d -> e
+    // a /\ b -> e, c /\ d -> e
+    // ~a \/ ~b \/ e
+    solver->addClause(mkLit(p, false),
+                      mkLit(q1q2.first, true),
+                      mkLit(q1q2.second, true));
+  }
+}
+
+void addIff(Minisat::Var p,
+            const vector<std::pair<Minisat::Var, Minisat::Var>> &q) {
+  addImply(p, q);
+  addImply(q, p);
+}
+
 void addIff(Minisat::Var p, Minisat::Var q) {
   // a <-> b
   // ~a\/b /\ ~b\/a
@@ -1330,26 +1491,32 @@ void addIff(Minisat::Var p, Minisat::Var q) {
   solver->addClause(mkLit(q, false), mkLit(p, true));
 }
 
-void addIff(Minisat::Var p, const vector<Minisat::Lit> &ls) {
-  Minisat::Lit q;
-  if (ls.empty()) {
-    solver->addClause(mkLit(p, false));
-    return;
-  } else {
-    q = ls[0];
-    for (size_t i = 1; i < ls.size(); i++) {
-      Minisat::Var x = solver->newVar();
-      solver->addClause(mkLit(x, true), q);
-      solver->addClause(mkLit(x, true), ls[i]);
-      solver->addClause(mkLit(x, false), ~q, ~ls[i]);
-      q = mkLit(x, false);
+std::pair<ExprWP, ExprWP> nextMatter(ExprWP low, ExprWP high) {
+  ExprWP i = low->mom, j = low;
+  while (i != high) {
+    if (auto ap = dynamic_cast<ApplicationP>(i); ap != nullptr) {
+      return {j, ap};
+    } else if (auto mp = dynamic_cast<ListMapP>(i); mp != nullptr) {
+      return {j, mp};
+    } else {
+      j = i;
+      i = i->mom;
     }
-    solver->addClause(mkLit(p, false), ~q);
-    solver->addClause(mkLit(p, true), q);
+  }
+  return {j, nullptr};
+}
+
+FunctionWP extractFunc(ExprWP e) {
+  if (auto ap = dynamic_cast<ApplicationP>(e); ap != nullptr) {
+    return ap->func;
+  } else if (auto mp = dynamic_cast<ListMapP>(e); mp != nullptr) {
+    return mp->func;
+  } else {
+    fail("extractFunc: can't extrace function");
   }
 }
 
-Minisat::Var analyzePath(const PortPath &p) {
+Minisat::Var analyzeSeg(const PortPath &p) {
   Minisat::Var var;
   auto it = path_var.find(p);
   if (it != path_var.end()) {
@@ -1357,121 +1524,224 @@ Minisat::Var analyzePath(const PortPath &p) {
   } else {
     var = path_var[p] = solver->newVar();
   }
+
   const PortLoc &from = p.from;
   const PortLoc &to = p.to;
   if (from.polar == Polar::Import && to.polar == Polar::Import) {
-    if (from.e->mom == to.e) {
-      auto func = from.e->mom->func;
-      addIff(var, ruleToVar(Import(portLocToPort(from), func, to.port)));
+    auto arg_higher = nextMatter(from.e, to.e);
+    auto arg = arg_higher.first;
+    auto higher = arg_higher.second;
+    if (higher == nullptr) {
+      auto func = extractFunc(to.e);
+      addIff(var, ruleToVar(Import(Port(arg->self_param, from.port),
+                                   func, to.port)));
       return var;
     } else {
-      goto from_up;
+      auto func = extractFunc(higher);
+      vector<std::pair<Minisat::Var, Minisat::Var>> q;
+      for (PortId i = 0; i < func->sort->n_import; i++) {
+        auto var1 = analyzeSeg(PortPath(PortLoc(higher, Polar::Import, i), to));
+        auto var2 = ruleToVar(Import(Port(arg->self_param, from.port),
+                                     func, i));
+        q.emplace_back(var1, var2);
+      }
+      addIff(var, q);
+      return var;
     }
   } else if (from.polar == Polar::Export && to.polar == Polar::Export) {
-    if (to.e->mom == from.e) {
-      auto func = to.e->mom->func;
-      addIff(var, ruleToVar(Export(func, from.port, portLocToPort(to))));
+    auto arg_higher = nextMatter(to.e, from.e);
+    auto arg = arg_higher.first;
+    auto higher = arg_higher.second;
+    if (higher == nullptr) {
+      auto func = extractFunc(from.e);
+      addIff(var, ruleToVar(Export(func, from.port,
+                                   Port(arg->self_param, to.port))));
       return var;
     } else {
-      goto to_up;
-    }
-  } else if (from.polar == Polar::Import && to.polar == Polar::Export) {
-    if (to.e->mom == p.lca && from.e->mom == p.lca) {
-      addIff(var, ruleToVar(Bind(portLocToPort(from), portLocToPort(to))));
+      auto func = extractFunc(higher);
+      vector<std::pair<Minisat::Var, Minisat::Var>> q;
+      for (PortId i = 0; i < func->sort->n_export; i++) {
+        auto var1 = analyzeSeg(PortPath(from, PortLoc(higher, Polar::Export, i)));
+        auto var2 = ruleToVar(Export(func, i, Port(arg->self_param, to.port)));
+        q.emplace_back(var1, var2);
+      }
+      addIff(var, q);
       return var;
-    } else if (from.e->mom == p.lca) {
-      goto to_up;
-    } else {
-      goto from_up;
     }
   } else {
-    fail("analyzePath: bad path");
-  }
-
- from_up: {
-    ApplicationP higher = from.e->mom;
-    FunctionWP func = higher->func;
-    vector<std::pair<Minisat::Var, Minisat::Var>> q;
-    for (PortId i = 0; i < func->sort->n_import; i++) {
-      auto var1 = analyzePath(PortPath(PortLoc(higher, Polar::Import, i),
-                                       to, p.lca));
-      auto var2 = ruleToVar(Import(portLocToPort(from), func, i));
-      q.emplace_back(var1, var2);
-    }
-    addIff(var, q);
-    return var;
-  }
- to_up: {
-    ApplicationP higher = to.e->mom;
-    FunctionWP func = higher->func;
-    vector<std::pair<Minisat::Var, Minisat::Var>> q;
-    for (PortId i = 0; i < func->sort->n_export; i++) {
-      auto var1 = analyzePath(PortPath(from,
-                                       PortLoc(higher, Polar::Export, i), p.lca));
-      auto var2 = ruleToVar(Export(func, i, portLocToPort(to)));
-      q.emplace_back(var1, var2);
-    }
-    addIff(var, q);
-    return var;
+    fail("analyzeSeg: bad path");
   }
 }
 
-void computeDepth(ExprP e, size_t d) {
-  e->depth = d;
-  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    for (auto e0 : ap->args) {
-      computeDepth(e0, d + 1);
+Minisat::Var varImport(ExprWP hole, PortId p1, ExprWP root, PortId p2) {
+  return analyzeSeg(PortPath(PortLoc(hole, Polar::Import, p1),
+                             PortLoc(root, Polar::Import, p2)));
+}
+
+Minisat::Var varExport(ExprWP hole, PortId p1, ExprWP root, PortId p2) {
+  return analyzeSeg(PortPath(PortLoc(root, Polar::Export, p2),
+                             PortLoc(hole, Polar::Export, p1)));
+}
+
+Minisat::Var conj3(Minisat::Var x, Minisat::Var y, Minisat::Var z) {
+  // v <-> x/\y/\z
+  // v -> x/\y/\z  ~v\/x /\ ~v\/y /\ ~v\/z
+  // ~x\/~y\/~z\/v
+  auto v = solver->newVar();
+  solver->addClause(mkLit(v, true), mkLit(x, false));
+  solver->addClause(mkLit(v, true), mkLit(y, false));
+  solver->addClause(mkLit(v, true), mkLit(z, false));
+  Minisat::vec<Minisat::Lit> ls;
+  ls.push(mkLit(x, true));
+  ls.push(mkLit(y, true));
+  ls.push(mkLit(z, true));
+  ls.push(mkLit(v, false));
+  solver->addClause(ls);
+  return v;
+}
+
+void addIff
+(Minisat::Var p,
+ const vector<std::tuple<Minisat::Var, Minisat::Var, Minisat::Var>> &q) {
+  for (auto &xyz : q) {
+    auto x = std::get<0>(xyz), y = std::get<1>(xyz), z = std::get<2>(xyz);
+    solver->addClause(mkLit(p, false),
+                      mkLit(x, true), mkLit(y, true), mkLit(z, true));
+  }
+  Minisat::vec<Minisat::Lit> defs;
+  for (auto &xyz : q) {
+    auto x = std::get<0>(xyz), y = std::get<1>(xyz), z = std::get<2>(xyz);
+    defs.push(mkLit(conj3(x, y, z), false));
+  }
+  defs.push(mkLit(p, true));
+  solver->addClause(defs);
+}
+
+std::pair<ExprWP, ExprWP> lastMatter(ExprWP low, ExprWP high) {
+  ExprWP i = low->mom, j = low;
+  ExprWP reti = nullptr, retj = j;
+  while (i != high) {
+    if (auto ap = dynamic_cast<ApplicationP>(i); ap != nullptr) {
+      reti = ap;
+      retj = j;
+    } else if (auto mp = dynamic_cast<ListMapP>(i); mp != nullptr) {
+      reti = mp;
+      retj = j;
     }
+    j = i;
+    i = i->mom;
+  }
+  return {retj, reti};
+}
+
+Minisat::Var varBindLeft(ExprWP hole, PortId p1, PortId p2) {
+  auto &&lca = ::lca(hole, hole);
+  ApplicationP ap = lca.high;
+  auto top = lastMatter(hole, ap);
+  if (top.second == nullptr) {
+    return ruleToVar(BindLeft(Port(top.first->self_param, p1), p2));
+  } else {
+    auto _ = lastMatter(top.second, ap);
+    auto param = _.first->self_param;
+    vector<std::tuple<Minisat::Var, Minisat::Var, Minisat::Var>> vs;
+    for (PortId i = 0; i < param->sort->n_import; i++) {
+      for (PortId j = 0; j < param->sort->n_export; j++) {
+        auto p = ruleToVar(BindLeft(Port(param, i), j));
+        auto q = analyzeSeg(PortPath(PortLoc(hole, Polar::Import, p1),
+                                     PortLoc(top.second, Polar::Import, i)));
+        auto r = analyzeSeg(PortPath(PortLoc(top.second, Polar::Export, j),
+                                     PortLoc(hole, Polar::Export, p2)));
+        vs.emplace_back(p, q, r);
+      }
+    }
+    auto v = solver->newVar();
+    addIff(v, vs);
+    return v;
   }
 }
 
-void findFreshDef(ExprP e, std::map<string, ExprP> &fdef) {
-  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    for (auto e0 : ap->args) {
-      findFreshDef(e0, fdef);
+Minisat::Var varBindRight(ExprWP hole, PortId p1, PortId p2) {
+  auto &&lca = ::lca(hole, hole);
+  ApplicationP ap = lca.high;
+  auto top = lastMatter(hole, ap);
+  if (top.second == nullptr) {
+    return ruleToVar(BindRight(Port(top.first->self_param, p1), p2));
+  } else {
+    auto _ = lastMatter(top.second, ap);
+    auto param = _.first->self_param;
+    vector<std::tuple<Minisat::Var, Minisat::Var, Minisat::Var>> vs;
+    for (PortId i = 0; i < param->sort->n_import; i++) {
+      for (PortId j = 0; j < param->sort->n_export; j++) {
+        auto p = ruleToVar(BindRight(Port(param, i), j));
+        auto q = analyzeSeg(PortPath(PortLoc(hole, Polar::Import, p1),
+                                     PortLoc(top.second, Polar::Import, i)));
+        auto r = analyzeSeg(PortPath(PortLoc(top.second, Polar::Export, j),
+                                     PortLoc(hole, Polar::Export, p2)));
+        vs.emplace_back(p, q, r);
+      }
     }
-  } else if (VarP var = dynamic_cast<VarP>(e.get());
-             var != nullptr && var->self_param->sort->name == "VarDef") {
-    if (fdef.find(var->name) != fdef.end()) {
-      fail("findFreshDef: fresh identifiers with same name");
-    }
-    fdef[var->name] = e;
+    auto v = solver->newVar();
+    addIff(v, vs);
+    return v;
   }
 }
 
-void findFreshUse(ExprP e, std::map<string, ExprP> &fdef) {
-  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    for (auto e0 : ap->args) {
-      findFreshUse(e0, fdef);
-    }
-  } else if (VarP var = dynamic_cast<VarP>(e.get());
-             var != nullptr && var->self_param->sort->name == "VarUse") {
-    if (auto it = fdef.find(var->name); it != fdef.end()) {
-      auto from1 = PortLoc(e.get(), Polar::Import, 0);
-      auto to1 = PortLoc(it->second.get(), Polar::Export, 0);
-      auto p = analyzePath(PortPath(from1, to1));
-      solver->addClause(mkLit(p, false));
+Minisat::Var varBind(ExprWP hole1, PortId p1, ExprWP hole2, PortId p2) {
+  auto &&lca = ::lca(hole1, hole2);
+  ApplicationP ap = lca.high;
+  if (lca.o != Orient::Same) {
+    return (lca.o == Orient::Right ? varBindLeft : varBindRight)(hole1, p1, p2);
+  } else if (lca.low == nullptr) {
+    auto top1 = lastMatter(hole1, ap);
+    auto top2 = lastMatter(hole2, ap);
+    PortId l1, r1, l2, r2;
+    ParameterP param1, param2;
+    if (top1.second == nullptr) {
+      l1 = r1 = p1;
+      r1 += 1;
+      param1 = top1.first->self_param;
     } else {
-      fail("findFreshUse: unbound identifier in rhs");
+      auto _ = lastMatter(top1.second, ap);
+      param1 = _.first->self_param;
+      l1 = 0;
+      r1 = param1->sort->n_import;
     }
-  }
-}
-
-void findDefToUse(ExprP e, vector<DefToUseP> &d2u) {
-  if (ApplicationP ap = dynamic_cast<ApplicationP>(e.get()); ap != nullptr) {
-    for (auto e0 : ap->args) {
-      findDefToUse(e0, d2u);
+    if (top2.second == nullptr) {
+      l2 = r2 = p2;
+      r2 += 1;
+      param2 = top2.first->self_param;
+    } else {
+      auto _ = lastMatter(top2.second, ap);
+      param2 = _.first->self_param;
+      l2 = 0;
+      r2 = param2->sort->n_export;
     }
-  } else if (DefToUseP du = dynamic_cast<DefToUseP>(e.get()); du != nullptr) {
-    d2u.emplace_back(du);
+    vector<std::tuple<Minisat::Var, Minisat::Var, Minisat::Var>> vs;
+    for (PortId i = l1; i < r1; i++) {
+      for (PortId j = l2; j < r2; j++) {
+        auto p = ruleToVar(Bind(Port(param1, i), Port(param2, j)));
+        auto q = top1.second == nullptr ? True :
+          analyzeSeg(PortPath(PortLoc(hole1, Polar::Import, p1),
+                              PortLoc(top1.second, Polar::Import, i)));
+        auto r = top2.second == nullptr ? True :
+          analyzeSeg(PortPath(PortLoc(top2.second, Polar::Export, j),
+                              PortLoc(hole2, Polar::Export, p2)));
+        vs.emplace_back(p, q, r);
+      }
+    }
+    auto v = solver->newVar();
+    addIff(v, vs);
+    return v;
+  } else {
+    fail("unsupported now; shall be so in a short time");
   }
 }
 
 void generateConstraint(const Macro &macro) {
-  auto &hs1 = macro.from_holes,
-       &hs2 = macro.to_holes;
-  computeDepth(macro.from, 0);
-  computeDepth(macro.to, 0);
+  auto &hs1 = macro.from_hc.holes,
+       &hs2 = macro.to_hc.holes;
+  macro.from->computeDepth(0);
+  macro.to->computeDepth(0);
   ApplicationP ap1;
   ApplicationP ap2;
   if (ap1 = dynamic_cast<ApplicationP>(macro.from.get()); ap1 == nullptr) {
@@ -1484,11 +1754,9 @@ void generateConstraint(const Macro &macro) {
       if (h1.first != g1.first &&
           hs2.find(g1.first) == hs2.end() &&
           hs2.find(h1.first) != hs2.end()) {
-        for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
-          for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
-            auto from1 = PortLoc(h1.second, Polar::Import, i);
-            auto to1 = PortLoc(g1.second, Polar::Export, j);
-            auto p = analyzePath(PortPath(from1, to1));
+        for (PortId i = 0; i < h1.second->sort->n_import; i++) {
+          for (PortId j = 0; j < g1.second->sort->n_export; j++) {
+            auto p = varBind(h1.second, i, g1.second, j);
             solver->addClause(mkLit(p, true));
           }
         }
@@ -1500,14 +1768,10 @@ void generateConstraint(const Macro &macro) {
     // import
     for (auto &h1 : hs1) {
       if ((h2 = hs2.find(h1.first)) != hs2.end()) {
-        for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
+        for (PortId i = 0; i < h1.second->sort->n_import; i++) {
           for (PortId j = 0; j < func->sort->n_import; j++) {
-            auto from1 = PortLoc(h1.second, Polar::Import, i);
-            auto to1 = PortLoc(ap1, Polar::Import, j);
-            auto p = analyzePath(PortPath(from1, to1, ap1));
-            auto from2 = PortLoc(h2->second, Polar::Import, i);
-            auto to2 = PortLoc(ap2, Polar::Import, j);
-            auto q = analyzePath(PortPath(from2, to2, ap2));
+            auto p = varImport(h1.second, i, ap1, j);
+            auto q = varImport(h2->second, i, ap2, j);
             addIff(p, q);
           }
         }
@@ -1516,14 +1780,10 @@ void generateConstraint(const Macro &macro) {
     // export
     for (auto &h1 : hs1) {
       if ((h2 = hs2.find(h1.first)) != hs2.end()) {
-        for (PortId i = 0; i < h1.second->self_param->sort->n_export; i++) {
+        for (PortId i = 0; i < h1.second->sort->n_export; i++) {
           for (PortId j = 0; j < func->sort->n_export; j++) {
-            auto from1 = PortLoc(ap1, Polar::Export, j);
-            auto to1 = PortLoc(h1.second, Polar::Export, i);
-            auto p = analyzePath(PortPath(from1, to1, ap1));
-            auto from2 = PortLoc(ap2, Polar::Export, j);
-            auto to2 = PortLoc(h2->second, Polar::Export, i);
-            auto q = analyzePath(PortPath(from2, to2, ap2));
+            auto p = varExport(h1.second, i, ap1, j);
+            auto q = varExport(h2->second, i, ap2, j);
             addIff(p, q);
           }
         }
@@ -1535,14 +1795,27 @@ void generateConstraint(const Macro &macro) {
         if (h1.first != g1.first &&
             (h2 = hs2.find(h1.first)) != hs2.end() &&
             (g2 = hs2.find(g1.first)) != hs2.end()) {
-          for (PortId i = 0; i < h1.second->self_param->sort->n_import; i++) {
-            for (PortId j = 0; j < g1.second->self_param->sort->n_export; j++) {
-              auto from1 = PortLoc(h1.second, Polar::Import, i);
-              auto to1 = PortLoc(g1.second, Polar::Export, j);
-              auto p = analyzePath(PortPath(from1, to1));
-              auto from2 = PortLoc(h2->second, Polar::Import, i);
-              auto to2 = PortLoc(g2->second, Polar::Export, j);
-              auto q = analyzePath(PortPath(from2, to2));
+          for (PortId i = 0; i < h1.second->sort->n_import; i++) {
+            for (PortId j = 0; j < g1.second->sort->n_export; j++) {
+              auto p = varBind(h1.second, i, g1.second, j);
+              auto q = varBind(h2->second, i, g2->second, j);
+              addIff(p, q);
+            }
+          }
+        }
+      }
+    }
+    // bind-left/right
+    for (auto &h1 : hs1) {
+      if (h1.second->cat != Hole::Cat::Norm) {
+        if ((h2 = hs2.find(h1.first)) != hs2.end()) {
+          for (PortId i = 0; i < h1.second->sort->n_import; i++) {
+            for (PortId j = 0; j < h1.second->sort->n_export; j++) {
+              auto p = varBindLeft(h1.second, i, j);
+              auto q = varBindLeft(h2->second, i, j);
+              addIff(p, q);
+              p = varBindRight(h1.second, i, j);
+              q = varBindRight(h2->second, i, j);
               addIff(p, q);
             }
           }
@@ -1550,81 +1823,30 @@ void generateConstraint(const Macro &macro) {
       }
     }
     // fresh in rhs should be uniquely bound
-    std::map<string, ExprP> fdef;
-    findFreshDef(macro.to, fdef);
-    findFreshUse(macro.to, fdef);
+    std::map<string, ExprWP> fdef;
+    macro.to->findFreshDef(fdef);
+    macro.to->findFreshUse(fdef);
     // ->use should be uniquely bound
     vector<DefToUseP> d2us;
-    findDefToUse(macro.to, d2us);
+    macro.to->findDefToUse(d2us);
     for (auto d2u : d2us) {
       for (auto &h : hs2) {
         if (h.first == d2u->hole) {
-          auto from1 = PortLoc(d2u, Polar::Import, 0);
-          auto to1 = PortLoc(h.second, Polar::Export, 0);
-          auto p = analyzePath(PortPath(from1, to1));
+          auto p = varBind(d2u, 0, h.second, 0);
           solver->addClause(mkLit(p, false));
-        } else {
-          // // another (possible) definition e and wanted definition d
-          // // either (1) e do not access d and
-          // vector<Minisat::Lit> c;
-          // Minisat::Var p = solver->newVar();
-          // for (size_t i = 0; i < h.second->self_param->sort->n_import; i++) {
-          //   auto from1 = PortLoc(h.second, Polar::Import, i);
-          //   auto to1 = PortLoc(hs2.at(d2u->hole), Polar::Export, 0);
-          //   auto q = analyzePath(PortPath(from1, to1));
-          //   c.emplace_back(mkLit(q, true));
-          // }
-          // addIff(p, c);
-          // for (size_t i = 0; i < h.second->self_param->sort->n_export; i++) {
-          //   // in LHS, something access both
-          //   vector<std::pair<Minisat::Var, Minisat::Var>> c;
-          //   auto tod = PortLoc(hs1.at(d2u->hole), Polar::Export, 0);
-          //   auto toe = PortLoc(hs1.at(h.first), Polar::Export, i);
-          //   auto lca = ::lca(tod.e, toe.e);
-          //   for (auto ap = lca; ap != nullptr; ap = ap->mom) {
-          //     for (auto e0 : ap->args) {
-          //       if (::lca(e0.get(), tod.e) != e0.get() &&
-          //           ::lca(e0.get(), toe.e) != e0.get()) {
-          //         for (size_t i = 0; i < e0->self_param->sort->n_import; i++) {
-          //           auto from = PortLoc(e0.get(), Polar::Import, i);
-          //           c.emplace_back(analyzePath(PortPath(from, tod)),
-          //                          analyzePath(PortPath(from, toe)));
-          //         }
-          //       }
-          //     }
-          //   }
-          //   auto s = solver->newVar();
-          //   addIff(s, c);
-          //   // or (2) do not access e
-          //   auto from1 = PortLoc(d2u, Polar::Import, 0);
-          //   auto to1 = PortLoc(hs2.at(h.first), Polar::Export, i);
-          //   auto q = analyzePath(PortPath(from1, to1));
-          //   // or (3) d access e
-          //   auto from2 = PortLoc(hs2.at(d2u->hole), Polar::Import, 0);
-          //   auto to2 = to1;
-          //   auto r = analyzePath(PortPath(from2, to2));
-          //   // (p /\ s) \/ ~q \/ r
-          //   // (p \/ ~q \/ r) /\ (s \/ ~q \/ r)
-          //   solver->addClause(mkLit(p, false), mkLit(q, true), mkLit(r, false));
-          //   solver->addClause(mkLit(s, false), mkLit(q, true), mkLit(r, false));
-          // }
         }
       }
     }
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
     for (PortId i = 0; i < func->sort->n_import; i++) {
       for (PortId j = 0; j < func->sort->n_import; j++) {
-        PortLoc from(hs1.at(hp2->id), Polar::Import, i);
-        PortLoc to(macro.from.get(), Polar::Import, j);
-        auto var = analyzePath(PortPath(from, to));
+        auto var = varImport(hs1.at(hp2->id), i, macro.from.get(), j);
         solver->addClause(mkLit(var, false));
       }
     }
     for (PortId i = 0; i < func->sort->n_export; i++) {
       for (PortId j = 0; j < func->sort->n_export; j++) {
-        PortLoc from(macro.from.get(), Polar::Export, j);
-        PortLoc to(hs1.at(hp2->id), Polar::Export, i);
-        auto var = analyzePath(PortPath(from, to));
+        auto var = varExport(hs1.at(hp2->id), i, macro.from.get(), j);
         solver->addClause(mkLit(var, false));
       }
     }
@@ -1641,6 +1863,8 @@ void readbackScope() {
       f->exports = vector<PortSet>(f->sort->n_export);
       for (auto &p : f->params) {
         p.binds = vector<PortSet>(p.sort->n_import);
+        p.bind_left = vector<vector<PortId>>(p.sort->n_import);
+        p.bind_right = vector<vector<PortId>>(p.sort->n_import);
       }
       f->scoped = 2;
     }
@@ -1655,6 +1879,12 @@ void readbackScope() {
       case RuleType::Bind:
         r.from.param->binds[r.from.port].emplace_back(r.to);
         break;
+      case RuleType::BindLeft:
+        r.from.param->bind_left[r.from.port].emplace_back(r.to.port);
+        break;
+      case RuleType::BindRight:
+        r.from.param->bind_right[r.from.port].emplace_back(r.to.port);
+        break;
       }
     }
   }
@@ -1668,6 +1898,8 @@ void readbackScope() {
 void doInfer() {
   Minisat::Solver solver;
   ::solver = &solver;
+  True = solver.newVar();
+  solver.addClause(mkLit(True, false));
   rule_var.clear();
   path_var.clear();
   for (auto &m : env.pending_macro) {
