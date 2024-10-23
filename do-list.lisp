@@ -14,17 +14,13 @@
 (defscope bind :import ((e 0)) ((x 0) (e 0)) :export ((x 0)) :bind ((e 0) (x 0)))
 
 (defsort Stx :import 2 :export 1)
-(defun do-bind (: x VarDef)* (: init Expr)* (: step Expr)* :sort Stx)
+(defun do-bind (: x VarDef) (: init Expr) (: step Expr) :sort Stx)
 (defun do (: binds Stx)* :sort Expr)
 (defmacro
-    (do (append (mapcar do-bind
-                        (append 1)
-                        (append 2)
-                        (append 3))))
-    (letrec (append (list (bind loop
-                           (lambda (append 1)
-                             (app (var loop) (append 3))))))
-     (app (var loop) (append 2))))
+    (do (append (mapcar do-bind (append 1) (append 2) (append 3))))
+    (letrec (append (list (bind loop (lambda (append 1)
+                                       (app (var loop) (append 3))))))
+      (app (var loop) (append 2))))
 
 (infer)
 (dump)

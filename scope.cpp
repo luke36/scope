@@ -206,7 +206,7 @@ struct Hole: public ListS { // miserably...
   virtual void findDefToUse(vector<DefToUseP> &) const override {}
   virtual void checkRepeat(bool inrpt) const override {
     if (inrpt) {
-      fail("error: hole in repeat");
+      fail("checkRepeat: hole in repeat");
     }
   }
   virtual ~Hole() = default;
@@ -239,7 +239,7 @@ struct DefToUse: public ListS {
   }
   virtual void checkRepeat(bool inrpt) const override {
     if (inrpt) {
-      fail("error: variable in repeat");
+      fail("checkRepeat: variable in repeat");
     }
   }
   virtual ~DefToUse() = default;
@@ -391,6 +391,9 @@ struct ListMap: public ListS {
       fail("typeOf: sort error");
     }
     for (size_t i = 0; i < args.size(); i++) {
+      if (params[i].msort != MetaSort::Mono) {
+        fail("typeOf: invalid function in mapcar");
+      }
       args[i]->typeOf(params[i].sort, holes);
       args[i]->self_param = &params[i];
     }
@@ -1483,12 +1486,14 @@ MSVar ruleToVar(const Rule &r) {
         } else {
           solver->addClause(mkLit(var, true));
         }
+        break;
       case RuleType::BindRight:
         if (hasPortId(r.from.param->bind_right[r.from.port], r.to.port)) {
           solver->addClause(mkLit(var, false));
         } else {
           solver->addClause(mkLit(var, true));
         }
+        break;
       }
     }
     rule_var[r] = var;
@@ -1754,7 +1759,13 @@ MSVar varBind(ExprWP hole1, PortId p1, ExprWP hole2, PortId p2) {
   auto &&lca = ::lca(hole1, hole2);
   ApplicationP ap = lca.high;
   if (lca.o != Orient::Same) {
-    return (lca.o == Orient::Right ? varBindLeft : varBindRight)(hole1, p1, p2);
+    auto f = (lca.o == Orient::Right ? BindLeft : BindRight);
+    auto &&impts = varUpToParam(hole1, p1, lca.high, Polar::Import);
+    auto &&expts = varUpToParam(hole1, p2, lca.high, Polar::Export);
+    return varDisj3(impts, expts,
+                    [&f](ParameterP prm, PortId i, ParameterP _, PortId j) {
+                      return ruleToVar(f(Port(prm, i), j));
+                    });
   } else if (lca.low == nullptr) {
     auto &&impts = varUpToParam(hole1, p1, ap, Polar::Import);
     auto &&expts = varUpToParam(hole2, p2, ap, Polar::Export);

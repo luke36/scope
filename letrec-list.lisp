@@ -20,18 +20,11 @@
 (defun letrec (: b Stx)* (: e Expr) :sort Expr)
 
 (defmacro
-    (letrec (append (mapcar rec-bind
-                            (append 1)
-                            (append 2)))
-            3)
-    (let (append (mapcar bind
-                         (append 1)
-                         (append (repeat (void)))))
-      (begin (append (mapcar set!
-                             (append (->use 1))
-                             (append 2))
-                     (list 3)))))
+    (letrec (append (mapcar rec-bind (append 1) (append 2))) 3)
+    (let (append (mapcar bind (append 1) (append (repeat (void)))))
+      (begin (append (mapcar set! (append (->use 1)) (append 2)) (list 3)))))
 
 (infer)
 (dump)
 (regexp void var begin set! let bind letrec rec-bind)
+(exit)

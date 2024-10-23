@@ -44,7 +44,7 @@
           (aux 4 5 (more-bind 3 (var 1) 6) 7 8 9))
 (defmacro (aux (vp-cons 1 2 (pair-pat 3 4) 5) 6 7 8 9 10)
           (aux (vp-cons a a 3 (vp-cons d d 4 5))
-               (bind-cons a (car (var 1)) (bind-cons d (car (var 2)) 6))
+               (bind-cons a (car (var 1)) (bind-cons d (cdr (var 2)) 6))
                7 8 9 10))
 (defmacro (aux (vp-cons 1 2 (aut-pat 3 4) 5) 6 7 8 9 10)
           (aux 5 6 (more-bind x (var 1) 7) 8 (more-bind 4 (app 3 (var x)) 9) 10))
