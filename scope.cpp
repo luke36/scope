@@ -758,6 +758,8 @@ struct Environment {
       os << "(defun " << f.second->name;
       for (auto &p : f.second->params) {
         os << " (: " << p.name << " " << p.sort->name << ")";
+        if (p.msort == MetaSort::List)
+          os << "*";
       }
       os << " :sort " << f.second->sort->name << ")" << std::endl;
     }
@@ -1761,7 +1763,7 @@ MSVar varBind(ExprWP hole1, PortId p1, ExprWP hole2, PortId p2) {
   if (lca.o != Orient::Same) {
     auto f = (lca.o == Orient::Right ? BindLeft : BindRight);
     auto &&impts = varUpToParam(hole1, p1, lca.high, Polar::Import);
-    auto &&expts = varUpToParam(hole1, p2, lca.high, Polar::Export);
+    auto &&expts = varUpToParam(hole2, p2, lca.high, Polar::Export);
     return varDisj3(impts, expts,
                     [&f](ParameterP prm, PortId i, ParameterP _, PortId j) {
                       return ruleToVar(f(Port(prm, i), j));
