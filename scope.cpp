@@ -150,6 +150,7 @@ struct Expr {
   virtual void findDefToUse(vector<DefToUseP> &d2u) const = 0;
   virtual void checkRepeat(bool inrpt) const = 0;
   virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const = 0;
+  virtual void collectGlobRef(std::set<ExprWP> &gref) = 0;
   virtual ~Expr() = default;
 };
 
@@ -188,6 +189,7 @@ struct Var: public Expr {
   virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
     sort->collectUndefPort(pts);
   }
+  virtual void collectGlobRef(std::set<ExprWP> &) override {}
   virtual ~Var() = default;
 };
 
@@ -229,6 +231,7 @@ struct Hole: public ListS { // miserably...
   virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
     sort->collectUndefPort(pts);
   }
+  virtual void collectGlobRef(std::set<ExprWP> &) override {}
   virtual ~Hole() = default;
 };
 
@@ -263,6 +266,7 @@ struct DefToUse: public ListS {
     }
   }
   virtual void collectUndefPort(std::set<optional<PortId> *> &) const override {}
+  virtual void collectGlobRef(std::set<ExprWP> &) override {}
   virtual ~DefToUse() = default;
 };
 
@@ -327,6 +331,11 @@ struct ListNF: public Expr {
       l->collectUndefPort(pts);
     }
   }
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    for (auto l : lists) {
+      l->collectGlobRef(gref);
+    }
+  }
   virtual ~ListNF() = default;
 };
 
@@ -365,6 +374,9 @@ struct ListSingle: public ListS {
   virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
     expr->collectUndefPort(pts);
   }
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    expr->collectGlobRef(gref);
+  }
   virtual ~ListSingle() = default;
 };
 
@@ -393,6 +405,9 @@ struct ListRepeat: public ListS {
   }
   virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
     expr->collectUndefPort(pts);
+  }
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    expr->collectGlobRef(gref);
   }
   virtual ~ListRepeat() = default;
 };
@@ -465,6 +480,11 @@ struct ListMap: public ListS {
     func->sort->collectUndefPort(pts);
     for (auto l : args) {
       l->collectUndefPort(pts);
+    }
+  }
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    for (auto l : args) {
+      l->collectGlobRef(gref);
     }
   }
   virtual ~ListMap() = default;
@@ -543,7 +563,38 @@ struct Application: public Expr {
       e0->collectUndefPort(pts);
     }
   }
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    for (auto e0 : args) {
+      e0->collectGlobRef(gref);
+    }
+  }
   virtual ~Application() = default;
+};
+
+struct GlobalRef: public Expr {
+  string x;
+  GlobalRef(string &&x_): x(std::move(x_)) {}
+  virtual void show(std::ostream &os) const override {
+    os << '"' << x << '"';
+  }
+  virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
+    if (sort->name != "VarUse") {
+      fail("typeOf: sort error");
+    }
+  }
+  virtual void locateHoles(HoleContext &) const override {}
+  virtual void computeDepth(size_t d) override {
+    depth = d;
+  };
+  virtual void findFreshDef(std::map<string, ExprWP> &) const override {};
+  virtual void findFreshUse(std::map<string, ExprWP> &) const override {};
+  virtual void findDefToUse(vector<DefToUseP> &) const override {};
+  virtual void checkRepeat(bool) const override {};
+  virtual void collectUndefPort(std::set<optional<PortId> *> &) const override {};
+  virtual void collectGlobRef(std::set<ExprWP> &gref) override {
+    gref.emplace(this);
+  }
+  virtual ~GlobalRef() = default;
 };
 
 inline ExprP mkVar(string &&name) {
@@ -559,6 +610,11 @@ inline ExprP mkHole(Id id, Hole::Cat cat) {
 inline ListSP mkListHole(Id id, Hole::Cat cat) {
   Hole *p = new Hole(id, cat);
   return shared_ptr<ListS>(p);
+}
+
+inline ExprP mkGlobRef(string &&name) {
+  GlobalRef *p = new GlobalRef(std::move(name));
+  return shared_ptr<Expr>(p);
 }
 
 inline ExprP mkFunc(FunctionWP func, vector<ExprP> &&args) {
@@ -984,6 +1040,13 @@ ExprP readExpr(std::istream &is) {
       return mkFunc(env.findFunctionException(func), std::move(args));
     }
     break;
+  }
+  case '"': {
+    string s;
+    while ((c = is.get()) != '"') {
+      s += c;
+    }
+    return mkGlobRef(std::move(s));
   }
   default: {
     is.putback(c);
@@ -1975,6 +2038,15 @@ void generateConstraint(const Macro &macro) {
           auto p = varBind(d2u, 0, h.second, 0);
           solver->addClause(mkLit(p, false));
         }
+      }
+    }
+    // global reference should import all the way up
+    std::set<ExprWP> gref;
+    macro.to->collectGlobRef(gref);
+    for (auto gr : gref) {
+      for (PortId i = 0; i < ap2->func->sort->n_import; i++) {
+        auto var = varImport(gr, 0, ap2, i);
+        solver->addClause(mkLit(var, false));
       }
     }
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
