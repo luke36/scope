@@ -2,6 +2,7 @@
 #include <fstream>
 #include <functional>
 #include <iostream>
+#include <set>
 #include <map>
 #include <memory>
 #include <optional>
@@ -15,6 +16,7 @@ using std::string;
 using std::vector;
 using std::pair;
 using std::shared_ptr;
+using std::optional;
 
 #define fail(x) (throw std::runtime_error(x))
 
@@ -31,10 +33,21 @@ struct Sort {
   Id id;
   string name;
   vector<FunctionWP> funcs;
-  PortId n_import;
-  PortId n_export;
-  Sort(Id id, string &&name, PortId n_import, PortId n_export):
-    id(id), name(std::move(name)), n_import(n_import), n_export(n_export) {}
+  optional<PortId> n_import;
+  optional<PortId> n_export;
+  bool need_trim;
+  Sort(Id id, string &&name,
+       optional<PortId> n_import, optional<PortId> n_export, bool need_trim):
+    id(id), name(std::move(name)), n_import(n_import), n_export(n_export),
+    need_trim(need_trim) {}
+  void collectUndefPort(std::set<optional<PortId> *> &pts) {
+    if (!n_import.has_value()) {
+      pts.emplace(&n_import);
+    }
+    if (!n_export.has_value()) {
+      pts.emplace(&n_export);
+    }
+  }
 };
 
 typedef shared_ptr<Sort> SortP;
@@ -136,6 +149,7 @@ struct Expr {
   virtual void findFreshUse(std::map<string, ExprWP> &fdef) const = 0;
   virtual void findDefToUse(vector<DefToUseP> &d2u) const = 0;
   virtual void checkRepeat(bool inrpt) const = 0;
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const = 0;
   virtual ~Expr() = default;
 };
 
@@ -170,6 +184,9 @@ struct Var: public Expr {
     if (inrpt) {
       fail("checkRepeat: variable in repeat");
     }
+  }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    sort->collectUndefPort(pts);
   }
   virtual ~Var() = default;
 };
@@ -209,6 +226,9 @@ struct Hole: public ListS { // miserably...
       fail("checkRepeat: hole in repeat");
     }
   }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    sort->collectUndefPort(pts);
+  }
   virtual ~Hole() = default;
 };
 
@@ -242,6 +262,7 @@ struct DefToUse: public ListS {
       fail("checkRepeat: variable in repeat");
     }
   }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &) const override {}
   virtual ~DefToUse() = default;
 };
 
@@ -301,6 +322,11 @@ struct ListNF: public Expr {
       l->checkRepeat(inrpt);
     }    
   }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    for (auto l : lists) {
+      l->collectUndefPort(pts);
+    }
+  }
   virtual ~ListNF() = default;
 };
 
@@ -336,6 +362,9 @@ struct ListSingle: public ListS {
   virtual void checkRepeat(bool inrpt) const override {
     expr->checkRepeat(inrpt);
   }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    expr->collectUndefPort(pts);
+  }
   virtual ~ListSingle() = default;
 };
 
@@ -361,6 +390,9 @@ struct ListRepeat: public ListS {
   virtual void findDefToUse(vector<DefToUseP> &) const override {}
   virtual void checkRepeat(bool) const override {
     expr->checkRepeat(true);
+  }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    expr->collectUndefPort(pts);
   }
   virtual ~ListRepeat() = default;
 };
@@ -427,6 +459,12 @@ struct ListMap: public ListS {
   virtual void checkRepeat(bool inrpt) const override {
     for (auto l : args) {
       l->checkRepeat(inrpt);
+    }
+  }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    func->sort->collectUndefPort(pts);
+    for (auto l : args) {
+      l->collectUndefPort(pts);
     }
   }
   virtual ~ListMap() = default;
@@ -497,6 +535,12 @@ struct Application: public Expr {
   virtual void checkRepeat(bool inrpt) const override {
     for (auto e0 : args) {
       e0->checkRepeat(inrpt);
+    }
+  }
+  virtual void collectUndefPort(std::set<optional<PortId> *> &pts) const override {
+    func->sort->collectUndefPort(pts);
+    for (auto e0 : args) {
+      e0->collectUndefPort(pts);
     }
   }
   virtual ~Application() = default;
@@ -607,7 +651,7 @@ struct Environment {
   std::map<string, FunctionP> funcs;
   vector<Macro> pending_macro;
 
-  std::optional<SortWP> findSort(const string &s) {
+  optional<SortWP> findSort(const string &s) {
     auto x = sorts.find(s);
     if (x == sorts.end()) {
       return {};
@@ -616,7 +660,7 @@ struct Environment {
     }
   }
 
-  std::optional<FunctionWP> findFunction(const string &s) {
+  optional<FunctionWP> findFunction(const string &s) {
     auto x = funcs.find(s);
     if (x == funcs.end()) {
       return {};
@@ -664,12 +708,13 @@ struct Environment {
     return p.second;
   }
 
-  bool addSort(string &&name, PortId n_import, PortId n_export) {
+  bool addSort(string &&name,
+               optional<PortId> n_import, optional<PortId> n_export) {
     string name1 = name;
     auto p = sorts.emplace(name1,
                            shared_ptr<Sort>
                            (new Sort(fresh(), std::move(name),
-                                     n_import, n_export)));
+                                     n_import, n_export, !n_import || !n_export)));
     return p.second;
   }
 
@@ -684,13 +729,17 @@ struct Environment {
       fail("addScope: already specified scope");
     }
     // clear from last exception
-    f->imports = vector<PortSet>(f->sort->n_import);
-    f->exports = vector<PortSet>(f->sort->n_export);
+    if (!f->sort->n_import.has_value() ||
+        !f->sort->n_export.has_value()) {
+      fail("addScope: sort has undefined number of ports");
+    }
+    f->imports = vector<PortSet>(f->sort->n_import.value());
+    f->exports = vector<PortSet>(f->sort->n_export.value());
     for (auto &p : f->params) {
-      p.binds = vector<PortSet>(p.sort->n_import);
+      p.binds = vector<PortSet>(p.sort->n_import.has_value());
       if (p.msort == MetaSort::List) {
-        p.bind_left = vector<vector<PortId>>(p.sort->n_import);
-        p.bind_right = vector<vector<PortId>>(p.sort->n_import);
+        p.bind_left = vector<vector<PortId>>(p.sort->n_import.value());
+        p.bind_right = vector<vector<PortId>>(p.sort->n_import.value());
       }
     }
 
@@ -751,8 +800,11 @@ struct Environment {
   void dump(std::ostream &os) {
     for (auto &s : sorts) {
       os << "(defsort "  << s.second->name
-         << " :import " << s.second->n_import
-         << " :export " << s.second->n_export << ")" << std::endl;
+         << " :import "
+         << (s.second->n_import.has_value() ? s.second->n_import.value() : '_')
+         << " :export "
+         << (s.second->n_export.has_value() ? s.second->n_export.value() : '_')
+         << ")" << std::endl;
     }
     for (auto &f : funcs) {
       os << "(defun " << f.second->name;
@@ -1057,8 +1109,8 @@ void readExactString(std::istream &is, const string &&s) {
 
 void readDefsort(std::istream &is) {
   string &&name = readString(is);
-  PortId n_import = 0;
-  PortId n_export = 0;
+  optional<PortId> n_import;
+  optional<PortId> n_export;
   char c;
   while ((c = getcharSkip(is)) != ')') {
     is.putback(c);
@@ -1187,10 +1239,19 @@ void readDefmacro(std::istream &is) {
   env.pending_macro.emplace_back(std::move(m));
 }
 
-void doInfer();
+void doInfer(int port_limit);
 
-void readInfer(std::istream &_) {
-  doInfer();
+void readInfer(std::istream &is) {
+  char c;
+
+  uint limit = 8;
+  if ((c = getcharSkip(is)) != ')') {
+    is.putback(c);
+    limit = readUInt(is);
+  } else {
+    is.putback(c);
+  }
+  doInfer(limit);
 }
 
 void readResolve(std::istream &is, std::function<void (ExprP)> k) {
@@ -1932,18 +1993,143 @@ void generateConstraint(const Macro &macro) {
   }
 }
 
+void trimPortSet(PortSet &ps, SortP s, vector<int> &map) {
+  for (auto it = ps.begin(); it != ps.end();) {
+    if ((*it).param->sort == s.get()) {
+      if (map[(*it).port] < 0) {
+        it = ps.erase(it);
+      } else {
+        (*it).port = map[(*it).port];
+        ++it;
+      }
+    } else {
+      ++it;
+    }
+  }
+}
+
+void trimPortIdVec(vector<PortId> &ps, vector<int> &map) {
+  for (auto it = ps.begin(); it != ps.end();) {
+    if (map[*it] < 0) {
+      it = ps.erase(it);
+    } else {
+      *it = map[*it];
+      ++it;
+    }
+  }
+}
+
+template<typename T> void reorderTrim(vector<T> &v, vector<int> &map) {
+  int max = -1;
+  for (auto n : map) {
+    max = n > max ? n : max;
+  }
+  vector<T> new_v(max + 1);
+  for (size_t i = 0; i < map.size(); i++) {
+    if (map[i] >= 0) {
+      new_v[map[i]] = v[i];
+    }
+  }
+  v = new_v;
+}
+
+bool trimScope(SortP s) {
+  vector<bool> import_use(s->n_import.value());
+  vector<bool> export_use(s->n_export.value());
+  for (auto f : s->funcs) {
+    for (size_t i = 0; i < f->imports.size(); i++) {
+      if (!f->imports[i].empty()) {
+        import_use[i] = true;
+      }
+    }
+    for (size_t i = 0; i < f->exports.size(); i++) {
+      if (!f->exports[i].empty()) {
+        export_use[i] = true;
+      }
+    }
+  }
+  vector<int> new_import(s->n_import.value());
+  vector<int> new_export(s->n_export.value());
+  PortId new_n_import = 0;
+  PortId new_n_export = 0;
+  for (size_t i = 0; i < import_use.size(); i++) {
+    if (!import_use[i]) {
+      new_import[i] = -1;
+    } else {
+      new_import[i] = 0;
+      for (size_t j = i; j > 0; j--) {
+        if (new_import[j - 1] >= 0) {
+          new_import[i] = new_import[j - 1] + 1;
+          break;
+        }
+      }
+      new_n_import = new_import[i] + 1;
+    }
+  }
+  for (size_t i = 0; i < export_use.size(); i++) {
+    if (!export_use[i]) {
+      new_export[i] = -1;
+    } else {
+      new_export[i] = 0;
+      for (size_t j = i; j > 0; j--) {
+        if (new_export[j - 1] >= 0) {
+          new_export[i] = new_export[j - 1] + 1;
+          break;
+        }
+      }
+      new_n_export = new_export[i] + 1;
+    }
+  }
+  if (s->n_import == new_n_import && s->n_export == new_n_export) {
+    return false;
+  }
+  s->n_import = new_n_import;
+  s->n_export = new_n_export;
+
+  for (auto &p : env.funcs) {
+    auto f = p.second;
+    for (auto &ps : f->imports) {
+      trimPortSet(ps, s, new_import);
+    }
+    for (auto &ps : f->exports) {
+      trimPortSet(ps, s, new_export);
+    }
+    if (f->sort == s.get()) {
+      reorderTrim(f->imports, new_import);
+      reorderTrim(f->exports, new_export);
+    }
+    for (auto &param : f->params) {
+      for (auto &ps : param.binds) {
+        trimPortSet(ps, s, new_export);
+      }
+      if (param.sort == s.get()) {
+        for (auto &pids : param.bind_left) {
+          trimPortIdVec(pids, new_export);
+        }
+        for (auto &pids : param.bind_right) {
+          trimPortIdVec(pids, new_export);
+        }
+        reorderTrim(param.binds, new_import);
+        reorderTrim(param.bind_left, new_import);
+        reorderTrim(param.bind_right, new_import);
+      }
+    }
+  }
+  return true;
+}
+
 void readbackScope() {
   for (auto &p : rule_var) {
     auto &r = p.first;
     auto var = p.second;
     auto f = r.func;
     if (!f->scoped) {
-      f->imports = vector<PortSet>(f->sort->n_import);
-      f->exports = vector<PortSet>(f->sort->n_export);
+      f->imports = vector<PortSet>(f->sort->n_import.value());
+      f->exports = vector<PortSet>(f->sort->n_export.value());
       for (auto &p : f->params) {
-        p.binds = vector<PortSet>(p.sort->n_import);
-        p.bind_left = vector<vector<PortId>>(p.sort->n_import);
-        p.bind_right = vector<vector<PortId>>(p.sort->n_import);
+        p.binds = vector<PortSet>(p.sort->n_import.value());
+        p.bind_left = vector<vector<PortId>>(p.sort->n_import.value());
+        p.bind_right = vector<vector<PortId>>(p.sort->n_import.value());
       }
       f->scoped = 2;
     }
@@ -1972,25 +2158,57 @@ void readbackScope() {
       p.second->scoped = 1;
     }
   }
+  int flag;
+  do {
+    flag = false;
+    for (auto &p : env.sorts) {
+      if (p.second->need_trim) {
+        flag |= trimScope(p.second);
+      }
+    }
+  } while (flag);
+  for (auto &p : env.sorts) {
+    if (p.second->need_trim) {
+      p.second->need_trim = false;
+    }
+  }
 }
 
-void doInfer() {
-  Minisat::Solver solver;
-  ::solver = &solver;
-  True = solver.newVar();
-  solver.addClause(mkLit(True, false));
-  rule_var.clear();
-  path_var.clear();
+void doInfer(int port_limit) {
+  std::set<optional<PortId> *> inferred_ports;
   for (auto &m : env.pending_macro) {
-    generateConstraint(m);
+    m.from->collectUndefPort(inferred_ports);
+    m.to->collectUndefPort(inferred_ports);
   }
-  std::cerr << solver.nVars() << ' ' << solver.nClauses() << std::endl;
-  solver.solve();
-  if (solver.okay()) {
-    readbackScope();
-  } else {
-    fail("doInfer: inference failed");
+  for (auto p : inferred_ports) {
+    *p = 1;
   }
+  do {
+    Minisat::Solver solver;
+    ::solver = &solver;
+    True = solver.newVar();
+    solver.addClause(mkLit(True, false));
+    rule_var.clear();
+    path_var.clear();
+    for (auto &m : env.pending_macro) {
+      generateConstraint(m);
+    }
+    std::cerr << solver.nVars() << ' ' << solver.nClauses() << std::endl;
+    solver.solve();
+    if (solver.okay()) {
+      readbackScope();
+      break;
+    } else {
+      if (inferred_ports.empty() || (*inferred_ports.begin())->value() > port_limit) {
+        fail("doInfer: inference failed");
+      } else {
+        for (auto p : inferred_ports) {
+          *p = p->value() * 2;
+          std::cout << p->value() << std::endl;
+        }
+      }
+    }
+  } while (1);
   env.pending_macro.clear();
 }
 
