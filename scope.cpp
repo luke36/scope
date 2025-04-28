@@ -571,16 +571,18 @@ struct Application: public Expr {
   virtual ~Application() = default;
 };
 
-struct GlobalRef: public Expr {
+struct GlobalDefRef: public Expr {
   string x;
-  GlobalRef(string &&x_): x(std::move(x_)) {}
+  SortWP sort;
+  GlobalDefRef(string &&x_): x(std::move(x_)) {}
   virtual void show(std::ostream &os) const override {
     os << '"' << x << '"';
   }
   virtual void typeOf(SortWP sort, const std::map<Id, HoleP> &) override {
-    if (sort->name != "VarUse") {
+    if (sort->name != "VarDef" && sort->name != "VarUse") {
       fail("typeOf: sort error");
     }
+    this->sort = sort;
   }
   virtual void locateHoles(HoleContext &) const override {}
   virtual void computeDepth(size_t d) override {
@@ -592,9 +594,11 @@ struct GlobalRef: public Expr {
   virtual void checkRepeat(bool) const override {};
   virtual void collectUndefPort(std::set<optional<PortId> *> &) const override {};
   virtual void collectGlobRef(std::set<ExprWP> &gref) override {
-    gref.emplace(this);
+    if (sort == VarUse) {
+      gref.emplace(this);
+    }
   }
-  virtual ~GlobalRef() = default;
+  virtual ~GlobalDefRef() = default;
 };
 
 inline ExprP mkVar(string &&name) {
@@ -612,8 +616,8 @@ inline ListSP mkListHole(Id id, Hole::Cat cat) {
   return shared_ptr<ListS>(p);
 }
 
-inline ExprP mkGlobRef(string &&name) {
-  GlobalRef *p = new GlobalRef(std::move(name));
+inline ExprP mkGlobDefRef(string &&name) {
+  GlobalDefRef *p = new GlobalDefRef(std::move(name));
   return shared_ptr<Expr>(p);
 }
 
@@ -796,7 +800,7 @@ struct Environment {
     f->imports = vector<PortSet>(f->sort->n_import.value());
     f->exports = vector<PortSet>(f->sort->n_export.value());
     for (auto &p : f->params) {
-      p.binds = vector<PortSet>(p.sort->n_import.has_value());
+      p.binds = vector<PortSet>(p.sort->n_import.value());
       if (p.msort == MetaSort::List) {
         p.bind_left = vector<vector<PortId>>(p.sort->n_import.value());
         p.bind_right = vector<vector<PortId>>(p.sort->n_import.value());
@@ -1050,7 +1054,7 @@ ExprP readExpr(std::istream &is) {
     while ((c = is.get()) != '"') {
       s += c;
     }
-    return mkGlobRef(std::move(s));
+    return mkGlobDefRef(std::move(s));
   }
   default: {
     is.putback(c);
