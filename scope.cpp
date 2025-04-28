@@ -756,11 +756,15 @@ struct Environment {
                           findSortException(std::get<2>(param[i])));
     }
     string name1 = name;
+    bool nullary = params.empty();
     auto p = funcs.emplace(name1,
                            shared_ptr<Function>
                            (new Function(fresh(), std::move(name),
                                          findSortException(sort),
                                          std::move(params))));
+    if (nullary) {
+      addScope(name1, {}, {}, {}, {}, {});
+    }
     return p.second;
   }
 
@@ -781,7 +785,7 @@ struct Environment {
                 const vector<pair<TextPort, PortId>> &bind_left,
                 const vector<pair<TextPort, PortId>> &bind_right) {
     auto f = findFunctionException(name);
-    if (f->scoped) {
+    if (f->scoped && !f->params.empty()) {
       fail("addScope: already specified scope");
     }
     // clear from last exception
