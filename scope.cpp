@@ -2049,14 +2049,18 @@ void generateConstraint(const Macro &macro) {
       }
     }
     // global reference should import all the way up
+    // too restrictive; just through a warning
     std::set<ExprWP> gref;
     macro.to->collectGlobRef(gref);
-    for (auto gr : gref) {
-      for (PortId i = 0; i < ap2->func->sort->n_import; i++) {
-        auto var = varImport(gr, 0, ap2, i);
-        solver->addClause(mkLit(var, false));
-      }
+    if (!gref.empty()) {
+      std::cerr << "warning: using global reference; be cautious!" << std::endl;
     }
+    // for (auto gr : gref) {
+    //   for (PortId i = 0; i < ap2->func->sort->n_import; i++) {
+    //     auto var = varImport(gr, 0, ap2, i);
+    //     solver->addClause(mkLit(var, false));
+    //   }
+    // }
   } else if (HoleP hp2 = dynamic_cast<HoleP>(macro.to.get()); hp2 != nullptr) {
     for (PortId i = 0; i < func->sort->n_import; i++) {
       for (PortId j = 0; j < func->sort->n_import; j++) {
