@@ -761,13 +761,15 @@ struct Environment {
     }
     string name1 = name;
     bool nullary = params.empty();
+    auto s = findSortException(sort);
     auto p = funcs.emplace(name1,
                            shared_ptr<Function>
                            (new Function(fresh(), std::move(name),
-                                         findSortException(sort),
-                                         std::move(params))));
-    if (nullary) {
-      addScope(name1, {}, {}, {}, {}, {});
+                                         s, std::move(params))));
+    if (nullary && s->n_export.has_value() && s->n_import.has_value()) {
+      vector<TextPortSet> import_nothing(s->n_import.value());
+      vector<TextPortSet> export_nothing(s->n_export.value());
+      addScope(name1, import_nothing, export_nothing, {}, {}, {});
     }
     return p.second;
   }
@@ -778,7 +780,8 @@ struct Environment {
     auto p = sorts.emplace(name1,
                            shared_ptr<Sort>
                            (new Sort(fresh(), std::move(name),
-                                     n_import, n_export, !n_import || !n_export)));
+                                     n_import, n_export,
+                                     !n_import.has_value() || !n_export.has_value())));
     return p.second;
   }
 
@@ -2238,6 +2241,13 @@ void readbackScope() {
     }
   }
   for (auto &p : env.funcs) {
+    auto f = p.second;
+    if (!f->scoped && f->params.empty() &&
+        f->sort->n_export.has_value() && f->sort->n_import.has_value()) {
+      f->imports = vector<PortSet>(f->sort->n_import.value());
+      f->exports = vector<PortSet>(f->sort->n_export.value());
+      f->scoped = 1;
+    }
     if (p.second->scoped == 2) {
       p.second->scoped = 1;
     }
