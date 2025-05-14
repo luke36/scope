@@ -760,15 +760,11 @@ struct Environment {
                           findSortException(std::get<2>(param[i])));
     }
     string name1 = name;
-    bool nullary = params.empty();
     auto p = funcs.emplace(name1,
                            shared_ptr<Function>
                            (new Function(fresh(), std::move(name),
                                          findSortException(sort),
                                          std::move(params))));
-    if (nullary) {
-      addScope(name1, {}, {}, {}, {}, {});
-    }
     return p.second;
   }
 
@@ -789,7 +785,7 @@ struct Environment {
                 const vector<pair<TextPort, PortId>> &bind_left,
                 const vector<pair<TextPort, PortId>> &bind_right) {
     auto f = findFunctionException(name);
-    if (f->scoped && !f->params.empty()) {
+    if (f->scoped) {
       fail("addScope: already specified scope");
     }
     // clear from last exception
@@ -953,6 +949,32 @@ struct Environment {
           }
         }
         os << ")" << std::endl;
+      } else if (f.second->sort->n_import && f.second->sort->n_export) {
+        bool nullary = true;
+        for (auto &p : f.second->params) {
+          auto s = p.sort;
+          if (!s->n_export || !s->n_import ||
+              s->n_export > 0 || s->n_import > 0) {
+            nullary = false;
+            break;
+          }
+        }
+        if (nullary) {
+          os << "(defscope " << f.second->name;
+          if (f.second->params.size() > 0) {
+            os << " :import";
+            for (size_t i = 0; i < f.second->sort->n_import; i++) {
+              os << " ()";
+            }
+          }
+          if (!f.second->exports.empty()) {
+            os << " :export";
+            for (size_t i = 0; i < f.second->sort->n_export; i++) {
+              os << " ()";
+            }
+          }
+          os << ")" << std::endl;
+        }
       }
     }
     for (auto &m : pending_macro) {
